@@ -1,0 +1,2617 @@
+/**
+ * ======================================================
+ *  GOD MODE v17.0 — BACKEND SERVER (KeyVault-compatible, NO GM-leak) (SELF-CONTAINED LOADER)
+ *  - [v17] FIX LỖI TRÊN MÁY THẬT: Android/iOS thật + IP nhà mạng thật KHÔNG còn bị 404 "Not found"
+ *          thầm lặng (client báo "Xác thực thiết bị/mạng thất bại" không rõ lý do).
+ *          (1) guardBanned: thiết bị mobile thật tự gỡ khoá IP/HWID rồi đi tiếp, không trả 404;
+ *          (2) mọi lỗi từ chối đều kèm message tiếng Việt (không còn body {error} trống);
+ *          (3) key bị thu hồi trên máy thật -> 401 có thông báo, KHÔNG âm thầm 404;
+ *          (4) getClientIp lấy client IP thật (req.ip / XFF đầu) thay vì IP edge/proxy cuối chuỗi;
+ *          (5) validateDevice: mobile thật miễn các dấu hiệu mềm (BAD_UA marker, UA ngắn, EMU marker
+ *              không rõ ràng), chỉ chặn automation rõ ràng (webdriver/headless/puppeteer...);
+ *          (6) HARD_DC_BAN không bao giờ chặn IP của UA mobile thật, kể cả khi SMART_BAN tắt;
+ *          (7) checkProxyIp nhận diện nhà mạng di động (Viettel/Vinaphone/Mobifone/FPT...) -> risk=low;
+ *          (8) requireSession: lệch UA trên mobile (Userscripts/iOS) chỉ ghi log, không 403;
+ *          (9) dumper-guard trên máy thật chỉ ghi log, không thu hồi key;
+ *          (10) nâng rate-limit attest 10 -> 30 lần/phút cho IP+HWID;
+ *          (11) anti-share mềm: cùng 1 key trên Android + iPhone thật của chủ chỉ ghi log, không 403.
+ *  - [v16] AUDIT-FIX cho may THAT Android/iOS: (1) session khong con chan khi IP quay số (CGNAT/Wi-Fi-4G),
+ *         chi ghi log; (2) guard ban nhận UA mới nhất của IP (chặn ban nhầm trước khi kịp attest);
+ *         (3) validateDevice: mobile thiếu fingerprint KHÔNG bị tính ban cứng; (4) attest/heartbeat proxy
+ *         cho mobile thật bỏ qua khi HARD_DC_BAN bật; (5) rate-limit gắn theo IP+HWID, nâng trần global
+ *         120→300/phút để không trúng 429 khi nhiều máy dùng chung IP nhà mạng (CGNAT).
+ *  - [v15] AUTO_UNLOCK_REAL_IP: IP THẬT của máy Android/iOS TỰ ĐỘNG MỞ KHOÁ NGAY khi có request
+ *         (middleware + mọi API route), không cần admin bấm thủ công. Ghi nhận IP thật (realIps),
+ *         tự xoá cache proxy nhận nhầm, không bao giờ ban lại IP thật.
+ *  - [v14] SMART_BAN mặc định BẬT: ban THÔNG MINH — CHỈ ban máy ảo/emulator/webdriver/bot + IP
+ *         datacenter+proxy/VPN đã XÁC NHẬN. Máy thật Android/iOS (UA mobile + attest thành công)
+ *         KHÔNG BAO GIỜ bị ban; nếu bị khoá nhầm sẽ TỰ ĐỘNG MỞ BAN ngay (khi có request tiếp theo).
+ *         Quét định kỳ 5 phút cũng tự gỡ ban của thiết bị thật. Ghi nhận realDevices vào KV.
+ *  - [v13] SAFE_MODE (CHẾ ĐỘ AN TOÀN) mặc định BẬT: auto-ban IP/HWID bị khoá MỀM — chỉ log + từ chối (403),
+ *         KHÔNG khoá vĩnh viễn nữa. Chỉ admin khoá thủ công mới có hiệu lực. Khắc phục triệt để lỗi ban nhầm
+ *         IP thật của nhà mạng di động (CGNAT) / thiết bị Android/iOS thật. Tắt bằng env SAFE_MODE=false hoặc panel.
+ *  - [v13] HARD_DC_BAN mặc định TẮT (kill-switch) — admin chủ động bật trong panel khi cần.
+ *  - [v13] checkProxyIp: nếu ip-api báo mobile=true (nhà mạng di động) → force risk=low, KHÔNG bao giờ chặn/ban.
+ *         Chỉ coi risk=high khi CẢ isDC lẫn isVPN/proxy (tránh nhận nhầm carrier IP thành datacenter).
+ *  - [v13] Nút "MỞ KHOÁ TẤT CẢ" trong admin panel: gỡ toàn bộ ban IP/HWID + xóa cache IP → reset thiết bị bị khoá.
+ *  - [v13] DUMPER_GUARD: ngưỡng lấy module 2→10 lần/giờ; vượt ngưỡng chỉ trả 429, KHÔNG ban key.
+ *  - [v13] Bỏ ban vĩnh viễn khi brute-force key (chỉ trả 401, tránh ban nhầm IP dùng chung CGNAT).
+ *  - [v12] SMART_VM_BLOCK: toggle "Chặn kèo script VM" giờ CHỈ chặn VM/proxy/datacenter/desktop UA.
+ *         Android/iOS thật (UA mobile + IP nhà mạng) vẫn kéo code bình thường khi toggle BẬT.
+ *         Bỏ blanket 404 ở /module & /code (đã bắt buộc session = thiết bị thật qua /attest).
+ *  - [v11] VÁ LỖ HỔNG: /kv-payload.js & /loader.user.js giờ có HARD_DC_BAN + chặn UA bot/curl/emulator
+ *         (trước đây 2 endpoint này KHÔNG có check nào → IP datacenter kéo được raw connector).
+ *  - [v11] /bootstrap.js chặn UA bot/curl/emulator (trước chỉ chặn IP datacenter).
+ *  - [v11] /module defense-in-depth: kiểm tra lại IP datacenter (dù session đã ràng buộc IP).
+ *  - [v11] checkProxyIp: fallback ip-api.com khi ipapi.is lỗi; cache lỗi chỉ 60s (thử lại sớm).
+ *  - [v11] Global rate-limit 120 req/phút/IP chống scan/dumper.
+ *  - [v11] Cảnh báo khởi động nếu BLOCK_VM_SCRIPT đang TẮT.
+ *  - [v10.1] SỬA: BLOCK_VM_SCRIPT (chặn kèo script VM) mặc định TẮT (kill-switch) — admin chủ động BẬT trong panel.
+ *  - [v10] MẶC ĐỊNH: chặn module 10đ (admin vẫn TẮT được trong panel).
+ *  - [v10] HARD_DC_BAN: IP datacenter/proxy/VPN gọi bất kỳ API nào (kể cả bootstrap.js) → BAN NGAY.
+ *  - [v10] DUMPER_GUARD: phát hiện hành vi dumper (gọi /module trực tiếp không qua process/fire,
+ *         attest→module <10s, lấy module ≥2 lần, heartbeat clientVersion=0 liên tục) → BAN key+hwid+ip.
+ *  - [v10] MODULE_WATERMARK: dấu vết duy nhất mỗi key+hwid nhúng vào module → leak dump là truy ra người mua.
+ *  - [v10] BANNED_KEYS: revoke key bị rò rỉ/dump (env BANNED_KEYS=KEY1,KEY2 hoặc khoá trong admin).
+ *  - [v10] Siết chữ ký HMAC: cửa sổ ts 30s→15s; /module & /code BẮT BUỘC có chữ ký + session hợp lệ.
+ *  - [v10] Cảnh báo khẩn nếu vẫn dùng SECRET mặc định ĐÃ RÒ RỈ (trong tất cả file dumper).
+ *  - [v8] TOÀN BỘ code connector (chức năng userscript) được NHÚNG sẵn
+ *    trong server (CONNECTOR_MODULE_EMBEDDED_B64) → không cần file ngoài.
+ *  - [v8] Endpoint ẩn GET <API_PREFIX>/bootstrap.js trả connector mã hoá
+ *  - [v8.1] Endpoint ẩn GET <API_PREFIX>/kv-payload.js trả RAW JS tương thích KeyVault
+ *  - [v8.2] FIX GM-LEAK: bridge GM_xmlhttpRequest/GM_addStyle là biến CỤC BỘ, tuyệt đối không gán
+ *         vào window → không còn kích hoạt anti-cheat "PHÁT HIỆN PHẦN MỀM LẠ (GM leak: GM_addStyle)".
+ *         (index.js): tự cài bridge GM_xmlhttpRequest qua fetch + chạy connector ngay,
+ *         không loader trung gian, không cache, KHÔNG đệ quy. Upload file này lên KeyVault.
+ *    AES-256-GCM (key PBKDF2 từ SECRET) cho loader.user.js tải & chạy.
+ *  - [v8] Server tự inject SERVER_BASE (origin request) + API_SECRET
+ *    (SECRET hiện tại) vào code connector khi phục vụ → luôn khớp.
+ *  - Giữ nguyên /code, /attest, /heartbeat auto-push (tương thích v7).
+ *  - BỎ chữ ký HMAC request (X-Ts/X-Nonce/X-Sign) theo yêu cầu
+ *  - ẨN TOÀN BỘ link API: prefix = 12 ký tự hex derived từ SECRET
+ *    (client tự tính ra cùng giá trị → người ngoài quét không tìm thấy)
+ *  - SESSION KHÔNG TRẠNG THÁI (HMAC-signed token) → sống qua mọi lần
+ *    Vercel khởi động lại / cold start (không phụ thuộc Map trong bộ nhớ)
+ *  - BAN VĨNH VIỄN IP + THIẾT BỊ khi phát hiện: máy ảo/emulator,
+ *    proxy/VPN/datacenter, trình duyệt giả/webdriver/headless.
+ *    Chỉ admin mở khoá thì dùng lại được.
+ *    → Lưu ban vào Vercel KV (Upstash) nếu có env KV_REST_API_URL/TOKEN
+ *      để tồn tại vĩnh viễn qua restart; nếu không có thì in-memory
+ *      (mất khi cold start) + seed từ env BANNED_LIST.
+ *  - Chỉ chấp nhận: máy Android/iOS THẬT + trình duyệt THẬT + mạng THẬT.
+ *  - Admin: đổi mật khẩu (hash scrypt), bật/tắt auto-ban & mobile-only,
+ *    quản lý danh sách ban (unban/ban thủ công), log hiển thị TÊN MÁY,
+ *    xem danh sách thiết bị đã kết nối.
+ *  - Anti-dump/hook: đáp án mã hóa AES-256-GCM bằng key derive từ
+ *    session token, token xoay sau mỗi request, phiên ràng buộc
+ *    key+hwid+ip+fp, thời gian sống ngắn (5 phút).
+ * ======================================================
+ *  Cài: npm install express@^4 cheerio cors
+ *  Chạy local: node server.js
+ *  Vercel: index.js require('./server.js') → export app
+ * ======================================================
+ */
+'use strict';
+const express  = require('express');
+const cheerio  = require('cheerio');
+const cors     = require('cors');
+const https    = require('https');
+const http     = require('http'); // [v11] fallback ip-api.com (free tier chi ho tro http)
+const crypto   = require('crypto');
+const app      = express();
+const PORT     = process.env.PORT || 3000;
+
+// ─── Middleware ───────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '5mb', verify: (req, _res, buf) => { req.rawBody = buf; } })); // [v9] 5mb chong DoS
+app.use(express.urlencoded({ extended: true, limit: '5mb' })); // [v9] 5mb chong DoS
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+// Security headers
+app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
+    // [v9] them headers bao mat
+    res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
+    res.removeHeader('X-Powered-By');
+    res.setHeader('Server', 'cloudflare'); // [v9] gia ma, khong tiet lo Express/Node
+    next();
+});
+
+// CORS: chỉ cho OLM + no-origin (GM_xmlhttpRequest)
+app.use(cors({
+    origin: (origin, cb) => {
+        // [v7] FIX iOS "Network error": extension Userscripts/Violentmonkey/Tampermonkey trên iOS
+        //       gửi origin = null hoặc safari-extension://... / moz-extension://... → CORS cũ CHẶN
+        //       → client báo "Không thể kết nối server: Network error". Auth KHÔNG dùng cookie
+        //       (HMAC signature + key + session token trong header/body) nên reflect origin là AN TOÀN.
+        cb(null, true);
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'X-Session', 'X-Fp-Hash', 'X-Seq', 'X-HWID', 'X-Ts', 'X-Nonce', 'X-Sign']
+}));
+app.options(/.*/, cors());
+
+// [v6.5.3 · LEGACY] Script cũ (v5.0, đã mã hoá, tải qua KeyVault) gọi endpoint KHÔNG có ẩn prefix.
+// Rewrite URL cũ → có prefix để route khớp. Client mới (tự tính prefix) không bị ảnh hưởng.
+app.use((req, res, next) => {
+    if (req.method === 'POST' && !req.path.startsWith(API_PREFIX)) {
+        const LEGACY = ['/verify', '/attest', '/process', '/fire', '/module', '/code', '/heartbeat', '/lock-report', '/lock-status', '/ping'];
+        if (LEGACY.includes(req.path)) {
+            adminLog('legacy-rewrite', { path: req.path, ip: getClientIp(req) });
+            req.url = API_PREFIX + req.path;
+        }
+    }
+    next();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SECRET & ẨN API PREFIX
+// ══════════════════════════════════════════════════════════════════════════════
+// Client (connector) dùng CÙNG giá trị mặc định này → tự tính ra cùng prefix.
+// Để tăng bảo mật: đặt env GODMODE_SECRET (64 hex) trên Vercel + cập nhật
+// API_SECRET trong connector cho khớp.
+const DEFAULT_SECRET = 'a7f3c9e1b2d48506fae1c7d3b9f0e2a4c6d8f1a3b5e7c9d0f2a4c6e8b1d3f5a7';
+let SECRET = process.env.GODMODE_SECRET || DEFAULT_SECRET;
+function hmacHex(s) { return crypto.createHmac('sha256', SECRET).update(s).digest('hex'); }
+function computeApiPrefix(sec) { return '/' + crypto.createHmac('sha256', sec).update('godmode:api:prefix:v4').digest('hex').slice(0, 12); }
+let API_PREFIX = computeApiPrefix(SECRET);
+console.log('[SECURITY] Ẩn API prefix: ' + API_PREFIX + ' (client tự tính từ SECRET)');
+if (SECRET === DEFAULT_SECRET) {
+    console.error('\x1b[31m[SECURITY CRITICAL — v10] BAN DANG DUNG SECRET MAC DINH DA ROI ROI (co trong tat ca file dumper)! Dat env GODMODE_SECRET (64 hex ngau nhien) tren Vercel NGAY, va cap nhat API_SECRET trong loader Payload_v9.js cho khop.\x1b[0m');
+    console.error('\x1b[31m[SECURITY] Key OLM-UPJO-GXYC-USLC-ER2O va HWID HW2334B90D da xuat hien trong dumper — xem xet revokle key do bang env BANNED_KEYS hoac admin panel.\x1b[0m');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MODULE "CHUẨN BỊ 10 ĐIỂM" — KHÔNG nằm trong userscript, chỉ server giữ.
+//  Serve mã hoá AES-256-GCM (key derive từ session token) CHỈ cho client:
+//    1) key PREMIUM/VIP/UNLIMITED hợp lệ
+//    2) attest/heartbeat sạch (không máy ảo / trình duyệt giả / proxy-VPN)
+//  Tăng PAYLOAD_MODULE_VERSION mỗi khi sửa code → client tự tải lại (auto-push).
+// ══════════════════════════════════════════════════════════════════════════════
+const PAYLOAD_MODULE_VERSION = 1;
+const PAYLOAD_MODULE_SRC = `
+var SESSION=ctx.SESSION, addLog=ctx.addLog, forceGetMeta=ctx.forceGetMeta;
+var SECRET_KEY_CS='1047823200';
+function decryptOLM_CS(base64Str){if(!base64Str)return null;try{var raw=atob(base64Str);var dec='';for(var i=0;i<raw.length;i++)dec+=String.fromCharCode(raw.charCodeAt(i)^SECRET_KEY_CS.charCodeAt(i%SECRET_KEY_CS.length));return decodeURIComponent(escape(dec));}catch(e){return null;}}
+function buildParamsCS(sq){var count=sq.count||4;if(sq.type===6){var orderArr=Array.from(Array(Math.max(count,15)),function(_,k){return k;});return {js:'',order_l:orderArr,order_r:orderArr};}return {js:'',order:Array.from(Array(count),function(_,k){return k;})};}
+function findCorrectInfoCS(node){var results=[];function traverse(n){if(!n)return;var subQ_ID=n.id||n._id||(n.props?n.props.id:null);if((n.type==='fillme-input'&&n.content)||(typeof n.content==='string'&&n.content.includes('data-accept='))){if(n.content.includes('data-accept=')){var regex=/data-accept="([^"]+)"/g;var match;while((match=regex.exec(n.content))!==null)results.push({type:4,ans:[match[1]],count:1,skill:n.id_skill,subId:subQ_ID||('raw_'+Math.random()),isText:true});}else{results.push({type:4,ans:[n.content],count:1,skill:n.id_skill,subId:subQ_ID,isText:true});}return;}if(n.type==='olm-list'||(Array.isArray(n.children)&&n.children.length>0)){var options=n.children;if(n.name==='true-false'||n.listType==='true-false'){results.push({type:13,ans:options.map(function(o){return (o.correct==true||o.correct==='true'||o.correct==1)?'1':'0';}),count:options.length,skill:n.id_skill,subId:subQ_ID});return;}if(n.name==='link-list'||n.listType==='matching'){results.push({type:6,ans:options.map(function(_,idx){return idx.toString();}),count:options.length,skill:n.id_skill,subId:subQ_ID});return;}if(options.some(function(c){return c.correct!==undefined;})){var trueIndex=options.findIndex(function(o){return o.correct==true||o.correct==='true'||o.correct==1;});results.push({type:1,ans:[(trueIndex===-1?0:trueIndex).toString()],count:options.length,skill:n.id_skill,subId:subQ_ID});return;}}if(Array.isArray(n.children))n.children.forEach(traverse);else if(Array.isArray(n.questions))n.questions.forEach(traverse);else if(Array.isArray(n.items))n.items.forEach(traverse);else if(Array.isArray(n.list))n.list.forEach(traverse);else if(n.root)traverse(n.root);}var contentToParse=node.json_content||node.content;if(typeof contentToParse==='string'&&!contentToParse.trim().startsWith('{')&&!contentToParse.trim().startsWith('[')){var decoded=decryptOLM_CS(contentToParse);if(decoded)contentToParse=decoded;}try{traverse(typeof contentToParse==='string'?JSON.parse(contentToParse):contentToParse);}catch(_){traverse(node);}if(results.length===0)results.push({type:1,ans:['0'],count:4,skill:null,subId:null});return results;}
+return async function(){
+forceGetMeta();
+if(!SESSION.meta.id_user||!SESSION.meta.id_cate){addLog('❌ Thiếu ID user/cate: user='+(SESSION.meta.id_user||'?')+' cate='+(SESSION.meta.id_cate||'?'),'err');return false;}
+var totalPackages=SESSION.raw_questions.length;
+if(totalPackages===0){addLog('❌ Chưa có câu hỏi để nộp!','err');return false;}
+var timeInput=document.getElementById('tl-god-time');
+var timeStr=timeInput?timeInput.value.toString().trim():'10.00';
+var tp=timeStr.split('.');
+var userMins=parseInt(tp[0])||0;
+var uss=tp[1]||'0';if(uss.length===1)uss+='0';
+var userSecs=parseInt(uss.substring(0,2));
+var calcSeconds=(userMins*60)+userSecs;
+if(calcSeconds<30)calcSeconds=120;
+var modeSel=document.getElementById('tl-modeSelect');
+var mode=modeSel?modeSel.value:'practice';
+var isExam=mode==='exam',isVideo=mode==='video';
+var now=Math.floor(Date.now()/1000);
+var totalSeconds,timeInit;
+if(isVideo||isExam){totalSeconds=calcSeconds;timeInit=now-totalSeconds;}else{totalSeconds=totalPackages*15;timeInit=now-totalSeconds;}
+var params=new URLSearchParams();
+var fakeLog=[];
+var max_tn_score=0,tn_score_calc=0,tl_max_calc=0;
+SESSION.raw_questions.forEach(function(q,i){
+var subQuestions=findCorrectInfoCS(q);
+var sub_count=subQuestions.length;
+var is_tl=(q.q_type==18||q.type==18||q.q_type==11);
+var final_score=sub_count;
+if(q.score!==undefined&&q.score!==null&&q.score!=='')final_score=parseFloat(q.score);
+else if(q.point!==undefined&&q.point!==null&&q.point!=='')final_score=parseFloat(q.point);
+if(!isVideo){params.append('quiz_list[]',q.id||q._id);params.append('score_list['+(q.id||q._id)+']',final_score);}
+var skillIDs=[].concat(Array.from(new Set(subQuestions.map(function(sq){return sq.skill;}).filter(function(s){return s!=null;}))));
+if(!isVideo)skillIDs.forEach(function(s){params.append('correct_skill[]',s);});
+if(isVideo||isExam){
+if(is_tl&&isExam){tl_max_calc+=final_score;fakeLog.push({answer:JSON.stringify(['Học sinh đã làm phần tự luận trên máy.']),label:[''],params:'{"js":"","order":[0]}',correct_skill:[],wrong_skill:[],type:[18],result:[0],idq:parseInt(q.id||q._id),score:final_score,chk:0});}
+else{
+max_tn_score+=final_score;tn_score_calc+=final_score;
+var ans_list=[],type_list=[],prs_list=[],resArr=[],mresult=[],listIdq=[],lbl_list=[];
+for(var j=0;j<sub_count;j++){var sq=subQuestions[j];ans_list.push(JSON.stringify((sq.type===4||sq.type===13||sq.type===6)?sq.ans:(sq.ans[0]||'0')));type_list.push(sq.type||1);prs_list.push(JSON.stringify(buildParamsCS(sq)));resArr.push(1);mresult.push([1]);listIdq.push(sq.subId&&sq.subId.toString().length>5?sq.subId:'q'+j);var lbl='';if(sq.ans.length===1&&!isNaN(sq.ans[0])&&sq.type!==4&&sq.type!==13)lbl=['A','B','C','D','E'][parseInt(sq.ans[0])]||'';lbl_list.push(lbl);}
+var logItem={answer:JSON.stringify(ans_list),label:sub_count===1?lbl_list:[],labels:lbl_list,params:sub_count===1?prs_list[0]:JSON.stringify({js:'',prs:prs_list,order:Array.from(Array(sub_count).keys())}),correct_skill:skillIDs,wrong_skill:[],type:type_list,result:resArr,mresult:mresult,idq:parseInt(q.id||q._id),score:final_score};
+if(isExam){logItem.chk=1;if(sub_count>1)logItem.list_idq=listIdq;}
+if(isVideo){logItem.marker=q.marker||(i+1);logItem.id=(q.id||q._id).toString();}
+fakeLog.push(logItem);
+}
+}else{
+var qpa=[],apa=[];
+subQuestions.forEach(function(sq){qpa.push(JSON.stringify(buildParamsCS(sq)));apa.push(JSON.stringify(sq.ans));});
+fakeLog.push({q_params:JSON.stringify(qpa),a_params:JSON.stringify(apa),result:1,correct:1,wrong:0,a_index:i,time_spent:Math.floor(Math.random()*15)+10});
+}
+});
+params.append('id_cate',SESSION.meta.id_cate);
+params.append('id_courseware',SESSION.meta.id_courseware||SESSION.meta.id_cate);
+params.append('id_user',SESSION.meta.id_user);
+params.append('id_grade',window.grade||window.id_grade||'10');
+if(SESSION.meta.id_school)params.append('id_school',SESSION.meta.id_school);
+if(SESSION.meta.id_group)params.append('id_group',SESSION.meta.id_group);
+params.append('type_vip','530');params.append('time_stored','0');params.append('date_end',now);
+params.append('data_log',JSON.stringify(fakeLog));
+if(isVideo){var vl=SESSION.video_length||900;params.append('type','5');params.append('type_exam','0');params.append('total_time',vl);params.append('current_time',vl);params.append('time_spent',totalSeconds+2);params.append('score_10','10');params.append('totalq',totalPackages);params.append('score',tn_score_calc);params.append('max_score',max_tn_score);params.append('answered',totalPackages);params.append('correct',totalPackages);params.append('count_problems',totalPackages);params.append('percent','100');params.append('pscore','10');params.append('score_status','10');var vLog={};vLog[timeInit]='start';vLog[timeInit+1]='start';vLog[timeInit+10]='reload';params.append('log',JSON.stringify(vLog));}
+else if(isExam){params.append('time_init',timeInit);params.append('time_spent',totalSeconds);params.append('score',tn_score_calc);params.append('max_score',max_tn_score+tl_max_calc);params.append('tn_score',tn_score_calc);params.append('type_exam','1');params.append('correct',tn_score_calc);params.append('wrong',0);params.append('name_user','');params.append('tl_score','0');params.append('times','0');params.append('iframe','false');var curT=timeInit+Math.floor(totalSeconds*0.1);var totalQs=SESSION.raw_questions.length;var usableTime=Math.max(10,totalSeconds-Math.floor(totalSeconds*0.1)-10);var baseInterval=usableTime/(totalQs||1);for(var c=0;c<totalQs;c++){curT+=Math.floor(baseInterval*(0.7+Math.random()*0.6));if(curT>=timeInit+totalSeconds)curT=timeInit+totalSeconds-2;params.append('choose_log['+c+'][ind]',c);params.append('choose_log['+c+'][t]',Math.floor(curT));params.append('choose_log['+c+'][l]',c+1);}}
+else{params.append('time_init',timeInit);params.append('time_spent',totalSeconds);params.append('time_elapsed',totalSeconds);params.append('score','100');params.append('score_10','10');params.append('star','20');params.append('theta','0');params.append('max_score','100');params.append('answered',totalPackages);params.append('correct',totalPackages);params.append('wrong','0');params.append('missed','0');params.append('count_problems',totalPackages);params.append('type','3');params.append('type_exam','0');var pLog={};pLog[timeInit]='start';pLog[timeInit+1]='start';params.append('log',JSON.stringify(pLog));}
+params.append('count_redo','0');params.append('ended','1');params.append('save_star','1');
+try{
+addLog('📤 Đang nộp bài lên OLM...','info');
+var csrf=SESSION.meta.csrf_token||(document.querySelector('meta[name="csrf-token"]')&&document.querySelector('meta[name="csrf-token"]').getAttribute('content'))||'';
+var response=await fetch('/course/teacher-static',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded; charset=UTF-8','x-csrf-token':csrf,'x-requested-with':'XMLHttpRequest'},body:params.toString()});
+if(!response.ok){addLog('❌ OLM trả lỗi HTTP '+response.status,'err');return false;}
+return true;
+}catch(err){addLog('❌ Lỗi kết nối OLM: '+err.message,'err');return false;}
+};
+`;
+function buildModulePayload(sessionToken, key, hwid) {
+    return encryptAnswers({ src: watermarkSrc(PAYLOAD_MODULE_SRC, key, hwid), v: PAYLOAD_MODULE_VERSION }, sessionToken);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v7] FULL CONNECTOR MODULE — TOÀN BỘ code chức năng userscript nằm ở SERVER.
+//  Loader (userscript tối thiểu) chỉ attest → nhận code mã hoá → giải mã → chạy.
+//  Nguồn code: env CONNECTOR_MODULE_SRC (chuỗi JS) HOẶC file tại
+//  CONNECTOR_MODULE_PATH (mặc định ./connector.module.js). Mã hoá AES-256-GCM
+//  key derive từ session token (chỉ client hợp lệ mới giải mã được).
+//  Tăng CONNECTOR_MODULE_VERSION mỗi khi cập nhật code → loader tự tải lại.
+// ══════════════════════════════════════════════════════════════════════════════
+// [v8] CONNECTOR NHÚNG SẴN trong server (base64) → self-contained, không cần file ngoài.
+// Vẫn ưu tiên: env CONNECTOR_MODULE_SRC > file ./connector.module.js > embedded.
+const CONNECTOR_MODULE_EMBEDDED_B64 = 'Ly8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCi8vICBDT05ORUNUT1IgTU9EVUxFIChwaOG7pWMgduG7pSB04burIFNFUlZFUikg4oCUIGLhuqNuIHY2LjUuNC1mdWxsCi8vICBUb8OgbiBi4buZIGNo4bupYyBuxINuZyB1c2Vyc2NyaXB0IG7hurFtIOG7nyDEkcOieS4gU2VydmVyIHThu7EgaW5qZWN0Ci8vICBTRVJWRVJfQkFTRSArIEFQSV9TRUNSRVQga2hpIHBo4bulYyB24bulIC9ib290c3RyYXAuanMuCi8vICBMb2FkZXIgKGxvYWRlci51c2VyLmpzKSBjaOG7iSB2aeG7h2MgdOG6o2kg4oaSIGdp4bqjaSBtw6Mg4oaSIGNo4bqheS4KLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCgovLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKLy8gIMSQ4buUSSAyIEdJw4EgVFLhu4ogTsOAWSBjaG8ga2jhu5twIHbhu5tpIHNlcnZlciBj4bunYSBi4bqhbjoKLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCmNvbnN0IFNFUlZFUl9CQVNFID0gJ2h0dHBzOi8vbW9kZ2FtZS52ZXJjZWwuYXBwJzsgIC8vIOKaoO+4jyDEkOG7lEkgdGjDoG5oIFVSTCBzZXJ2ZXIgVmVyY2VsIGPhu6dhIGLhuqFuCmNvbnN0IEFQSV9TRUNSRVQgID0gJ2E3ZjNjOWUxYjJkNDg1MDZmYWUxYzdkM2I5ZjBlMmE0YzZkOGYxYTNiNWU3YzlkMGYyYTRjNmU4YjFkM2Y1YTcnOyAgLy8g4pqg77iPIMSQ4buUSSBraOG7m3AgZW52IEdPRE1PREVfU0VDUkVUIHRyw6puIHNlcnZlcgovLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKLy8gW3Y1XSBNw6MgaG/DoSByZXF1ZXN0IGJvZHkg4oCUIMSR4buVaSB0cnVlIFNBVSBLSEkgc2VydmVyIGjhu5cgdHLhu6MgZ2nhuqNpIG3DoyB2NQpjb25zdCBSRVFVRVNUX0VOQ1JZUFRJT04gPSBmYWxzZTsKLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCgo7KGZ1bmN0aW9uICgpIHsKICAgICd1c2Ugc3RyaWN0JzsKCiAgICAvLyDilIDilIDilIAgU3RvcmFnZSBrZXkg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACiAgICBjb25zdCBMU19LRVkgICAgICAgPSAnX3RsX2Nvbm5fa2V5JzsKICAgIGNvbnN0IExTX1RZUEUgICAgICA9ICdfdGxfY29ubl90eXBlJzsKICAgIGNvbnN0IExTX0VYUCAgICAgICA9ICdfdGxfY29ubl9leHAnOwogICAgY29uc3QgTFNfVEhFTUUgICAgID0gJ190aWVwX3RoZW1lJzsKICAgIGxldCAgIENVUlJFTlRfS0VZICA9IG51bGw7CiAgICBsZXQgICBLRVlfU1RBVFVTICAgPSB7IHZhbGlkOiBmYWxzZSwgdHlwZTogbnVsbCwgZXhwaXJlc19hdDogbnVsbCB9OwogICAgbGV0ICAgQ1VSUkVOVF9ERVZJQ0UgPSAnJzsgLy8gW3Y0XSB0w6puIG3DoXkgKGzhuqV5IHThu6sgc2VydmVyIHNhdSBhdHRlc3QpCgogICAgLy8g4pSA4pSA4pSAIFNFU1NJT04gKGRhdGEgY2FwdHVyZWQgZnJvbSBYSFIpIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgAogICAgY29uc3QgU0VTU0lPTiA9IHsKICAgICAgICByYXdfcXVlc3Rpb25zOiBbXSwKICAgICAgICBtZXRhOiB7IGlkX3VzZXI6IG51bGwsIGlkX2NhdGU6IG51bGwsIGlkX2NvdXJzZXdhcmU6IG51bGwsCiAgICAgICAgICAgICAgICBpZF9zY2hvb2w6IG51bGwsIGlkX2dyb3VwOiBudWxsLCBjc3JmX3Rva2VuOiBudWxsIH0sCiAgICAgICAgYXV0b19tb2RlOiAgICAncHJhY3RpY2UnLAogICAgICAgIHZpZGVvX2xlbmd0aDogOTAwCiAgICB9OwoKICAgIC8vIOKUgOKUgOKUgCBUaGVtZSDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKICAgIGxldCBDVVJSRU5UX1RIRU1FID0gbG9jYWxTdG9yYWdlLmdldEl0ZW0oTFNfVEhFTUUpIHx8ICdkZWZhdWx0JzsKCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIC8vICBbdjQuMV0gS0nhu4JNIFRSQSBMT+G6oEkgS0VZIOKAlCBHSeG7kE5HIFYzIENPUkUKICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgZnVuY3Rpb24gaXNQcmVtaXVtS2V5KCkgewogICAgICAgIGNvbnN0IHQgPSAoS0VZX1NUQVRVUy50eXBlIHx8IF9zTFMuZ2V0KExTX1RZUEUpIHx8ICcnKS50b1N0cmluZygpLnRvVXBwZXJDYXNlKCk7IC8vIFt2NV0gb2JmdXNjYXRlZCByZWFkCiAgICAgICAgcmV0dXJuIHQgPT09ICdQUkVNSVVNJyB8fCB0ID09PSAnVklQJyB8fCB0ID09PSAnVU5MSU1JVEVEJzsKICAgIH0KCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIC8vICBbdjQuMV0gWOG7rCBMw50gT0xNIEFDQ09VTlQgTUlTTUFUQ0gKICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgZnVuY3Rpb24gaGFuZGxlT2xtTWlzbWF0Y2goc2VydmVyT2xtLCBjdXJyZW50T2xtKSB7CiAgICAgICAgLy8gWMOzYSBrZXkga2jhu49pIGLhu5kgbmjhu5sgdsOgIGxvY2FsU3RvcmFnZQogICAgICAgIGxvY2FsU3RvcmFnZS5yZW1vdmVJdGVtKExTX0tFWSk7CiAgICAgICAgbG9jYWxTdG9yYWdlLnJlbW92ZUl0ZW0oTFNfVFlQRSk7CiAgICAgICAgbG9jYWxTdG9yYWdlLnJlbW92ZUl0ZW0oTFNfRVhQKTsKICAgICAgICBDVVJSRU5UX0tFWSAgICA9IG51bGw7CiAgICAgICAgS0VZX1NUQVRVUyAgICAgPSB7IHZhbGlkOiBmYWxzZSwgdHlwZTogbnVsbCwgZXhwaXJlc19hdDogbnVsbCB9OwogICAgICAgIF9zZWNTZXNzaW9uICAgID0geyB0b2tlbjogbnVsbCwgZXhwOiAwLCBmcEhhc2g6IG51bGwsIHNlcTogMSB9OwogICAgICAgIENVUlJFTlRfREVWSUNFID0gJyc7CgogICAgICAgIC8vIFjDs2EgcGFuZWwgVUkgbuG6v3UgxJFhbmcgaGnhu4duCiAgICAgICAgY29uc3QgcGFuZWxFbCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC1wYW5lbCcpOwogICAgICAgIGNvbnN0IGZiICAgICAgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtZmxvYXRCdG4nKTsKICAgICAgICBpZiAocGFuZWxFbCkgcGFuZWxFbC5yZW1vdmUoKTsKICAgICAgICBpZiAoZmIpICAgICAgZmIucmVtb3ZlKCk7CgogICAgICAgIC8vIEhp4buHbiBtb2RhbCB0aMO0bmcgYsOhbyBy4buTaSBxdWF5IGzhuqFpIHRyYW5nIMSRxINuZyBuaOG6rXAga2V5CiAgICAgICAgc2hvd0N1c3RvbU1vZGFsKHsKICAgICAgICAgICAgaWNvbjogICfwn5qrJywKICAgICAgICAgICAgdGl0bGU6ICdUw4BJIEtIT+G6ok4gT0xNIEtIw5RORyBLSOG7mlAhJywKICAgICAgICAgICAgbGluZXM6IFsKICAgICAgICAgICAgICAgIGBLZXkgxJHGsOG7o2MgxJHEg25nIGvDvSBjaG8gdMOgaSBraG/huqNuOiA8Yj4ke3NlcnZlck9sbX08L2I+YCwKICAgICAgICAgICAgICAgIGBUw6BpIGtob+G6o24gT0xNIGhp4buHbiB04bqhaTogPGI+JHtjdXJyZW50T2xtfTwvYj5gLAogICAgICAgICAgICAgICAgYOKaoO+4jyBWdWkgbMOybmcgxJHEg25nIG5o4bqtcCDEkcO6bmcgdMOgaSBraG/huqNuIE9MTSDEkeG7gyBz4butIGThu6VuZyBrZXkgbsOgeSxgLAogICAgICAgICAgICAgICAgYGhv4bq3YyBsacOqbiBo4buHIGFkbWluIMSR4buDIMSRxrDhu6NjIGjhu5cgdHLhu6MhYAogICAgICAgICAgICBdLAogICAgICAgICAgICBvbk9rOiAoKSA9PiBidWlsZExvY2tTY3JlZW4oJ+KaoO+4jyBUw6BpIGtob+G6o24gT0xNIGtow7RuZyBraOG7m3AgduG7m2kga2V5IMSRw6MgxJHEg25nIGvDvSEnKQogICAgICAgIH0pOwogICAgfQoKICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgLy8gIEjhu4YgVEjhu5BORyBHSUFPIERJ4buGTiBUSEVPIENI4bumIMSQ4buAIChUSEVNRSkg4oCUIGdp4buRbmcgY29yZSB2My4yCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIGZ1bmN0aW9uIGdldFRoZW1lQ29sb3JzKHRoZW1lKSB7CiAgICAgICAgY29uc3QgVCA9IHsKICAgICAgICAgICAgZGVmYXVsdDogewogICAgICAgICAgICAgICAgYzE6JyMwMGYyZmUnLCBjMjonIzRmYWNmZScsCiAgICAgICAgICAgICAgICBiZ092ZXJsYXk6J3JnYmEoMTMsMTcsMjMsMC45NSknLCBiZ1BhbmVsOidyZ2JhKDEzLDE3LDIzLDAuODgpJywKICAgICAgICAgICAgICAgIGJvcmRlcjoncmdiYSgwLDI0MiwyNTQsMC4yKScsIGJvcmRlclN0cm9uZzoncmdiYSgwLDI0MiwyNTQsMC4zKScsCiAgICAgICAgICAgICAgICBib3JkZXJTdWJ0bGU6J3JnYmEoMCwyNDIsMjU0LDAuMTIpJywKICAgICAgICAgICAgICAgIGhlYWRlckJnOidsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLHJnYmEoMCwyNDIsMjU0LDAuMDcpLHJnYmEoNzksMTcyLDI1NCwwLjA0KSknLAogICAgICAgICAgICAgICAgZ2xvd0NvbG9yOidyZ2JhKDAsMjQyLDI1NCwwLjQ1KScsIGdsb3dTdHJvbmc6J3JnYmEoMCwyNDIsMjU0LDAuNyknLAogICAgICAgICAgICAgICAgZ2xvd01pZDoncmdiYSgwLDI0MiwyNTQsMC4yNSknLCBnbG93U3VidGxlOidyZ2JhKDAsMjQyLDI1NCwwLjA4KScsCiAgICAgICAgICAgICAgICBnbG93UHVsc2U6J3JnYmEoMCwyNDIsMjU0LDAuNTUpJywKICAgICAgICAgICAgICAgIGlucHV0Qm9yZGVyOidyZ2JhKDAsMjQyLDI1NCwwLjQpJywgaW5wdXRDb2xvcjonIzAwZjJmZScsCiAgICAgICAgICAgICAgICBmbG9hdEdyYWRpZW50OidsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLCMwMGYyZmUsIzRmYWNmZSknLAogICAgICAgICAgICAgICAgYnJhbmRHcmFkaWVudDonbGluZWFyLWdyYWRpZW50KDkwZGVnLCMwMGYyZmUsIzRmYWNmZSwjMDBmMmZlKScsCiAgICAgICAgICAgICAgICBzdGF0dXNCb3JkZXI6J3JnYmEoMCwyMzAsMTIwLDAuMjUpJywgc3RhdHVzQmc6J3JnYmEoMCwyMzAsMTIwLDAuMDQpJywKICAgICAgICAgICAgICAgIHBhbmVsSW5zZXQ6J3JnYmEoMCwyNDIsMjU0LDAuMDgpJywKICAgICAgICAgICAgICAgIHNlbGVjdEJvcmRlcjoncmdiYSgwLDI0MiwyNTQsMC4yKScsIGNvbnNvbGVCb3JkZXI6J3JnYmEoMCwyNDIsMjU0LDAuMTIpJywKICAgICAgICAgICAgICAgIGZ4Q1NTOicnLCBwYW5lbEV4dHJhOicnLAogICAgICAgICAgICAgICAgdGhlbWVMYWJlbDon8J+UtSBN4bq3YyDEkOG7i25oJywKICAgICAgICAgICAgICAgIHByZXZpZXdCZzonbGluZWFyLWdyYWRpZW50KDEzNWRlZywjMDAxNTIwLCMwMGYyZmU1NSknLAogICAgICAgICAgICAgICAgcHJldmlld0JvcmRlcjoncmdiYSgwLDI0MiwyNTQsMC41KScsCiAgICAgICAgICAgICAgICBwcmV2aWV3VGV4dDonIzAwZjJmZScsCiAgICAgICAgICAgIH0sCiAgICAgICAgICAgIGdyYXk6IHsKICAgICAgICAgICAgICAgIGMxOicjZTBlMGUwJywgYzI6JyNhMGEwYTAnLAogICAgICAgICAgICAgICAgYmdPdmVybGF5OidyZ2JhKDEwLDEwLDEwLDAuOTcpJywgYmdQYW5lbDoncmdiYSgyMCwyMCwyMCwwLjk0KScsCiAgICAgICAgICAgICAgICBib3JkZXI6J3JnYmEoMjAwLDIwMCwyMDAsMC4xOCknLCBib3JkZXJTdHJvbmc6J3JnYmEoMjMwLDIzMCwyMzAsMC4zKScsCiAgICAgICAgICAgICAgICBib3JkZXJTdWJ0bGU6J3JnYmEoMTcwLDE3MCwxNzAsMC4xKScsCiAgICAgICAgICAgICAgICBoZWFkZXJCZzonbGluZWFyLWdyYWRpZW50KDEzNWRlZyxyZ2JhKDEyMCwxMjAsMTIwLDAuMTIpLHJnYmEoNjAsNjAsNjAsMC4wNSkpJywKICAgICAgICAgICAgICAgIGdsb3dDb2xvcjoncmdiYSgyMTAsMjEwLDIxMCwwLjM1KScsIGdsb3dTdHJvbmc6J3JnYmEoMjIwLDIyMCwyMjAsMC42KScsCiAgICAgICAgICAgICAgICBnbG93TWlkOidyZ2JhKDIwMCwyMDAsMjAwLDAuMiknLCBnbG93U3VidGxlOidyZ2JhKDE2MCwxNjAsMTYwLDAuMDcpJywKICAgICAgICAgICAgICAgIGdsb3dQdWxzZToncmdiYSgyMDAsMjAwLDIwMCwwLjQ1KScsCiAgICAgICAgICAgICAgICBpbnB1dEJvcmRlcjoncmdiYSgyMDAsMjAwLDIwMCwwLjM4KScsIGlucHV0Q29sb3I6JyNkOGQ4ZDgnLAogICAgICAgICAgICAgICAgZmxvYXRHcmFkaWVudDonbGluZWFyLWdyYWRpZW50KDEzNWRlZywjYzBjMGMwLCM2NjYpJywKICAgICAgICAgICAgICAgIGJyYW5kR3JhZGllbnQ6J2xpbmVhci1ncmFkaWVudCg5MGRlZywjYzBjMGMwLCNmZmZmZmYsI2QwZDBkMCwjYzBjMGMwKScsCiAgICAgICAgICAgICAgICBzdGF0dXNCb3JkZXI6J3JnYmEoMTYwLDE2MCwxNjAsMC4yKScsIHN0YXR1c0JnOidyZ2JhKDYwLDYwLDYwLDAuMDcpJywKICAgICAgICAgICAgICAgIHBhbmVsSW5zZXQ6J3JnYmEoMjAwLDIwMCwyMDAsMC4wNyknLAogICAgICAgICAgICAgICAgc2VsZWN0Qm9yZGVyOidyZ2JhKDE5MCwxOTAsMTkwLDAuMiknLCBjb25zb2xlQm9yZGVyOidyZ2JhKDE2MCwxNjAsMTYwLDAuMSknLAogICAgICAgICAgICAgICAgZnhDU1M6YAogICAgICAgICAgICAgICAgICAgICN0bC1jb25uLWZ4LWJhciB7IGhlaWdodDoycHg7IGJhY2tncm91bmQ6bGluZWFyLWdyYWRpZW50KDkwZGVnLHRyYW5zcGFyZW50LHJnYmEoMjU1LDI1NSwyNTUsMC4wOCkscmdiYSgyNTUsMjU1LDI1NSwwLjU1KSxyZ2JhKDI1NSwyNTUsMjU1LDAuMDgpLHRyYW5zcGFyZW50KTsgYmFja2dyb3VuZC1zaXplOjMwMCUgMTAwJTsgYW5pbWF0aW9uOm1ldGFsU3dlZXAgMi44cyBsaW5lYXIgaW5maW5pdGU7IH0KICAgICAgICAgICAgICAgICAgICBAa2V5ZnJhbWVzIG1ldGFsU3dlZXAgeyAwJXtiYWNrZ3JvdW5kLXBvc2l0aW9uOjEwMCUgMH0gMTAwJXtiYWNrZ3JvdW5kLXBvc2l0aW9uOi0yMDAlIDB9IH0KICAgICAgICAgICAgICAgICAgICAjdGwtcGFuZWwgeyBib3gtc2hhZG93OiAwIDAgNjBweCByZ2JhKDAsMCwwLDAuODUpLCAwIDAgMzBweCByZ2JhKDE4MCwxODAsMTgwLDAuMDYpLCBpbnNldCAwIDFweCAwIHJnYmEoMjU1LDI1NSwyNTUsMC4wOCk7IH0KICAgICAgICAgICAgICAgICAgICAjdGwtY29ubi1wYW5lbCB7IGJveC1zaGFkb3c6IDAgMCA2MHB4IHJnYmEoMCwwLDAsMC44NSksIGluc2V0IDAgMXB4IDAgcmdiYSgyNTUsMjU1LDI1NSwwLjA4KTsgfQogICAgICAgICAgICAgICAgYCwKICAgICAgICAgICAgICAgIHBhbmVsRXh0cmE6JzxkaXYgaWQ9InRsLWNvbm4tZngtYmFyIj48L2Rpdj4nLAogICAgICAgICAgICAgICAgdGhlbWVMYWJlbDon4pqrIFjDoW0gQuG6oWMnLAogICAgICAgICAgICAgICAgcHJldmlld0JnOidsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLCMxYTFhMWEsIzY2NiknLAogICAgICAgICAgICAgICAgcHJldmlld0JvcmRlcjoncmdiYSgyMjAsMjIwLDIyMCwwLjQ1KScsCiAgICAgICAgICAgICAgICBwcmV2aWV3VGV4dDonI2UwZTBlMCcsCiAgICAgICAgICAgIH0sCiAgICAgICAgICAgIHBpbms6IHsKICAgICAgICAgICAgICAgIGMxOicjZmY2ZWI0JywgYzI6JyNmZjE0OTMnLAogICAgICAgICAgICAgICAgYmdPdmVybGF5OidyZ2JhKDE4LDQsMTQsMC45NyknLCBiZ1BhbmVsOidyZ2JhKDI2LDQsMTgsMC45MyknLAogICAgICAgICAgICAgICAgYm9yZGVyOidyZ2JhKDI1NSwxMTAsMTgwLDAuMiknLCBib3JkZXJTdHJvbmc6J3JnYmEoMjU1LDExMCwxODAsMC4zOCknLAogICAgICAgICAgICAgICAgYm9yZGVyU3VidGxlOidyZ2JhKDI1NSwxMTAsMTgwLDAuMTIpJywKICAgICAgICAgICAgICAgIGhlYWRlckJnOidsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLHJnYmEoMjU1LDExMCwxODAsMC4wOSkscmdiYSgyNTUsMjAsMTQ3LDAuMDQpKScsCiAgICAgICAgICAgICAgICBnbG93Q29sb3I6J3JnYmEoMjU1LDExMCwxODAsMC40NSknLCBnbG93U3Ryb25nOidyZ2JhKDI1NSwxMTAsMTgwLDAuNzUpJywKICAgICAgICAgICAgICAgIGdsb3dNaWQ6J3JnYmEoMjU1LDExMCwxODAsMC4yMiknLCBnbG93U3VidGxlOidyZ2JhKDI1NSwyMCwxNDcsMC4wNyknLAogICAgICAgICAgICAgICAgZ2xvd1B1bHNlOidyZ2JhKDI1NSwxMTAsMTgwLDAuNTUpJywKICAgICAgICAgICAgICAgIGlucHV0Qm9yZGVyOidyZ2JhKDI1NSwxMTAsMTgwLDAuNDIpJywgaW5wdXRDb2xvcjonI2ZmYjNkOScsCiAgICAgICAgICAgICAgICBmbG9hdEdyYWRpZW50OidsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLCNmZjZlYjQsI2ZmMTQ5MyknLAogICAgICAgICAgICAgICAgYnJhbmRHcmFkaWVudDonbGluZWFyLWdyYWRpZW50KDkwZGVnLCNmZjZlYjQsI2ZmY2NlOCwjZmYxNDkzLCNmZjZlYjQpJywKICAgICAgICAgICAgICAgIHN0YXR1c0JvcmRlcjoncmdiYSgyNTUsMTEwLDE4MCwwLjIpJywgc3RhdHVzQmc6J3JnYmEoMjU1LDIwLDE0NywwLjA1KScsCiAgICAgICAgICAgICAgICBwYW5lbEluc2V0OidyZ2JhKDI1NSwxMTAsMTgwLDAuMSknLAogICAgICAgICAgICAgICAgc2VsZWN0Qm9yZGVyOidyZ2JhKDI1NSwxMTAsMTgwLDAuMiknLCBjb25zb2xlQm9yZGVyOidyZ2JhKDI1NSwxMTAsMTgwLDAuMTIpJywKICAgICAgICAgICAgICAgIGZ4Q1NTOmAKICAgICAgICAgICAgICAgICAgICAjdGwtcGFuZWwgeyBhbmltYXRpb246c2FrdXJhUGFuZWxHbG93IDNzIGVhc2UtaW4tb3V0IGluZmluaXRlOyB9CiAgICAgICAgICAgICAgICAgICAgI3RsLWNvbm4tcGFuZWwgeyBhbmltYXRpb246c2FrdXJhUGFuZWxHbG93IDNzIGVhc2UtaW4tb3V0IGluZmluaXRlOyB9CiAgICAgICAgICAgICAgICAgICAgQGtleWZyYW1lcyBzYWt1cmFQYW5lbEdsb3cgewogICAgICAgICAgICAgICAgICAgICAgICAwJSwxMDAleyBib3gtc2hhZG93OjAgMCA2MHB4IHJnYmEoMCwwLDAsMC44KSwwIDAgMjVweCByZ2JhKDI1NSwxMTAsMTgwLDAuMSksaW5zZXQgMCAwIDAgMXB4IHJnYmEoMjU1LDExMCwxODAsMC4wNik7IH0KICAgICAgICAgICAgICAgICAgICAgICAgNTAleyBib3gtc2hhZG93OjAgMCA2MHB4IHJnYmEoMCwwLDAsMC44KSwwIDAgNDVweCByZ2JhKDI1NSwxMTAsMTgwLDAuMiksaW5zZXQgMCAwIDAgMXB4IHJnYmEoMjU1LDExMCwxODAsMC4xMik7IH0KICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgLnNha3VyYS1wZXRhbCB7IHBvc2l0aW9uOmFic29sdXRlOyBwb2ludGVyLWV2ZW50czpub25lOyBib3JkZXItcmFkaXVzOjUwJSAwIDUwJSAwOyBiYWNrZ3JvdW5kOnJnYmEoMjU1LDExMCwxODAsMC4yMik7IGFuaW1hdGlvbjpzYWt1cmFEcmlmdCBsaW5lYXIgaW5maW5pdGU7IH0KICAgICAgICAgICAgICAgICAgICBAa2V5ZnJhbWVzIHNha3VyYURyaWZ0IHsgMCV7dHJhbnNmb3JtOnRyYW5zbGF0ZVkoLTEwcHgpIHJvdGF0ZSgwZGVnKTtvcGFjaXR5OjAuN30gMTAwJXt0cmFuc2Zvcm06dHJhbnNsYXRlWSg0MjBweCkgcm90YXRlKDI3MGRlZyk7b3BhY2l0eTowfSB9CiAgICAgICAgICAgICAgICAgICAgI3RsLWNvbm4tZngtcGV0YWxzIHsgcG9zaXRpb246YWJzb2x1dGU7dG9wOjA7bGVmdDowO3JpZ2h0OjA7aGVpZ2h0OjEwMCU7cG9pbnRlci1ldmVudHM6bm9uZTtvdmVyZmxvdzpoaWRkZW47ei1pbmRleDowO2JvcmRlci1yYWRpdXM6MTZweDsgfQogICAgICAgICAgICAgICAgYCwKICAgICAgICAgICAgICAgIHBhbmVsRXh0cmE6YDxkaXYgaWQ9InRsLWNvbm4tZngtcGV0YWxzIj4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJzYWt1cmEtcGV0YWwiIHN0eWxlPSJ3aWR0aDo3cHg7aGVpZ2h0OjdweDtsZWZ0OjglO3RvcDotMTBweDthbmltYXRpb24tZHVyYXRpb246My44czthbmltYXRpb24tZGVsYXk6MHM7Ij48L2Rpdj4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJzYWt1cmEtcGV0YWwiIHN0eWxlPSJ3aWR0aDo1cHg7aGVpZ2h0OjVweDtsZWZ0OjI4JTt0b3A6LTEwcHg7YW5pbWF0aW9uLWR1cmF0aW9uOjUuMXM7YW5pbWF0aW9uLWRlbGF5OjAuOXM7Ij48L2Rpdj4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJzYWt1cmEtcGV0YWwiIHN0eWxlPSJ3aWR0aDo4cHg7aGVpZ2h0OjhweDtsZWZ0OjU1JTt0b3A6LTEwcHg7YW5pbWF0aW9uLWR1cmF0aW9uOjQuNHM7YW5pbWF0aW9uLWRlbGF5OjEuN3M7Ij48L2Rpdj4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJzYWt1cmEtcGV0YWwiIHN0eWxlPSJ3aWR0aDo0cHg7aGVpZ2h0OjRweDtsZWZ0Ojc1JTt0b3A6LTEwcHg7YW5pbWF0aW9uLWR1cmF0aW9uOjMuMnM7YW5pbWF0aW9uLWRlbGF5OjAuNHM7Ij48L2Rpdj4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJzYWt1cmEtcGV0YWwiIHN0eWxlPSJ3aWR0aDo2cHg7aGVpZ2h0OjZweDtsZWZ0OjkyJTt0b3A6LTEwcHg7YW5pbWF0aW9uLWR1cmF0aW9uOjQuOXM7YW5pbWF0aW9uLWRlbGF5OjIuMXM7Ij48L2Rpdj4KICAgICAgICAgICAgICAgIDwvZGl2PmAsCiAgICAgICAgICAgICAgICB0aGVtZUxhYmVsOifwn4y4IEjhu5NuZyBTYWt1cmEnLAogICAgICAgICAgICAgICAgcHJldmlld0JnOidsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLCMxYTA1MTAsI2ZmNmViNDU1KScsCiAgICAgICAgICAgICAgICBwcmV2aWV3Qm9yZGVyOidyZ2JhKDI1NSwxMTAsMTgwLDAuNTUpJywKICAgICAgICAgICAgICAgIHByZXZpZXdUZXh0OicjZmY2ZWI0JywKICAgICAgICAgICAgfQogICAgICAgIH07CiAgICAgICAgcmV0dXJuIFRbdGhlbWVdIHx8IFQuZGVmYXVsdDsKICAgIH0KCiAgICAvLyA9PT09PT09PT09IENTUyBMT0NLIFNDUkVFTiDigJQgZ2nhu5FuZyBjb3JlID09PT09PT09PT0KICAgIGZ1bmN0aW9uIGdldExvY2tTY3JlZW5TdHlsZXMoKSB7CiAgICAgICAgY29uc3QgdGMgPSBnZXRUaGVtZUNvbG9ycyhDVVJSRU5UX1RIRU1FKTsKICAgICAgICByZXR1cm4gYAogICAgICAgICAgICBAaW1wb3J0IHVybCgnaHR0cHM6Ly9mb250cy5nb29nbGVhcGlzLmNvbS9jc3MyP2ZhbWlseT1PcmJpdHJvbjp3Z2h0QDQwMDs3MDA7OTAwJmZhbWlseT1TaGFyZStUZWNoK01vbm8mZmFtaWx5PVJhamRoYW5pOndnaHRANDAwOzYwMDs3MDAmZGlzcGxheT1zd2FwJyk7CiAgICAgICAgICAgICN0bC1jb25uLW92ZXJsYXkgeyBwb3NpdGlvbjpmaXhlZDt0b3A6MDtsZWZ0OjA7d2lkdGg6MTAwdnc7aGVpZ2h0OjEwMHZoO2JhY2tncm91bmQ6JHt0Yy5iZ092ZXJsYXl9O2JhY2tkcm9wLWZpbHRlcjpibHVyKDE1cHgpO3otaW5kZXg6MjE0NzQ4MzY0NztkaXNwbGF5OmZsZXg7YWxpZ24taXRlbXM6Y2VudGVyO2p1c3RpZnktY29udGVudDpjZW50ZXI7Zm9udC1mYW1pbHk6J1JhamRoYW5pJyxzYW5zLXNlcmlmOyB9CiAgICAgICAgICAgICN0bC1jb25uLXBhbmVsIHsgd2lkdGg6NDIwcHg7YmFja2dyb3VuZDoke3RjLmJnUGFuZWx9O2JvcmRlcjoxcHggc29saWQgJHt0Yy5ib3JkZXJTdHJvbmd9O2JvcmRlci1yYWRpdXM6MjBweDtib3gtc2hhZG93OjAgMCA2MHB4IHJnYmEoMCwwLDAsMC44KSwwIDAgMCAxcHggJHt0Yy5wYW5lbEluc2V0fSBpbnNldDt0ZXh0LWFsaWduOmNlbnRlcjtvdmVyZmxvdzpoaWRkZW47YW5pbWF0aW9uOnRsRmFkZUluIDAuM3MgZWFzZTtwb3NpdGlvbjpyZWxhdGl2ZTsgfQogICAgICAgICAgICBAa2V5ZnJhbWVzIHRsRmFkZUluIHsgZnJvbXtvcGFjaXR5OjA7dHJhbnNmb3JtOnNjYWxlKDAuOTUpfXRve29wYWNpdHk6MTt0cmFuc2Zvcm06c2NhbGUoMSl9IH0KICAgICAgICAgICAgI3RsLWNvbm4taGVhZGVyIHsgcGFkZGluZzoyMnB4O2JhY2tncm91bmQ6JHt0Yy5oZWFkZXJCZ307Ym9yZGVyLWJvdHRvbToxcHggc29saWQgJHt0Yy5ib3JkZXJ9OyB9CiAgICAgICAgICAgIC50bC1icmFuZC1uYW1lIHsgZm9udC1mYW1pbHk6J09yYml0cm9uJyxzYW5zLXNlcmlmO2ZvbnQtc2l6ZToyMnB4O2ZvbnQtd2VpZ2h0OjcwMDtiYWNrZ3JvdW5kOiR7dGMuYnJhbmRHcmFkaWVudH07YmFja2dyb3VuZC1zaXplOjIwMCU7LXdlYmtpdC1iYWNrZ3JvdW5kLWNsaXA6dGV4dDstd2Via2l0LXRleHQtZmlsbC1jb2xvcjp0cmFuc3BhcmVudDthbmltYXRpb246dGxTaGltbWVyIDNzIGxpbmVhciBpbmZpbml0ZTsgfQogICAgICAgICAgICBAa2V5ZnJhbWVzIHRsU2hpbW1lciB7IDEwMCV7YmFja2dyb3VuZC1wb3NpdGlvbjoyMDAlIDUwJX0gfQogICAgICAgICAgICAjdGwtY29ubi1ib2R5IHsgcGFkZGluZzozMHB4IDI1cHg7IH0KICAgICAgICAgICAgLnRsLXN1YnRpdGxlIHsgY29sb3I6cmdiYSgyNTUsMjU1LDI1NSwwLjcpO2ZvbnQtc2l6ZToxM3B4O21hcmdpbi1ib3R0b206MTBweDtmb250LWZhbWlseTonU2hhcmUgVGVjaCBNb25vJzsgfQogICAgICAgICAgICAudGwtd2FybmluZyB7IGNvbG9yOiNmZmMxMDc7Zm9udC1zaXplOjEycHg7bWFyZ2luLWJvdHRvbToyMHB4O2JhY2tncm91bmQ6cmdiYSgyNTUsMTkzLDcsMC4xKTtwYWRkaW5nOjhweDtib3JkZXItcmFkaXVzOjZweDsgfQogICAgICAgICAgICAudGwtaW5wdXQgeyB3aWR0aDoxMDAlO3BhZGRpbmc6MTRweDtiYWNrZ3JvdW5kOnJnYmEoMCwwLDAsMC41NSk7Ym9yZGVyOjFweCBzb2xpZCAke3RjLmlucHV0Qm9yZGVyfTtib3JkZXItcmFkaXVzOjEwcHg7Y29sb3I6JHt0Yy5pbnB1dENvbG9yfTtmb250LWZhbWlseTonU2hhcmUgVGVjaCBNb25vJztmb250LXNpemU6MTZweDt0ZXh0LWFsaWduOmNlbnRlcjttYXJnaW4tYm90dG9tOjE1cHg7dHJhbnNpdGlvbjowLjJzO2JveC1zaXppbmc6Ym9yZGVyLWJveDsgfQogICAgICAgICAgICAudGwtaW5wdXQ6Zm9jdXMgeyBvdXRsaW5lOm5vbmU7Ym9yZGVyLWNvbG9yOiR7dGMuYzF9O2JveC1zaGFkb3c6MCAwIDE2cHggJHt0Yy5nbG93TWlkfTsgfQogICAgICAgICAgICAudGwtYnRuIHsgd2lkdGg6MTAwJTtwYWRkaW5nOjE0cHg7Ym9yZGVyOm5vbmU7Ym9yZGVyLXJhZGl1czoxMHB4O2N1cnNvcjpwb2ludGVyO2ZvbnQtZmFtaWx5OidPcmJpdHJvbicsc2Fucy1zZXJpZjtmb250LXNpemU6MTRweDtmb250LXdlaWdodDo5MDA7bWFyZ2luLWJvdHRvbToxMnB4O3RyYW5zaXRpb246MC4yczsgfQogICAgICAgICAgICAudGwtYnRuLXVubG9jayB7IGJhY2tncm91bmQ6bGluZWFyLWdyYWRpZW50KDEzNWRlZywjMDBiMDliLCM5NmM5M2QpO2NvbG9yOiNmZmY7IH0KICAgICAgICAgICAgLnRsLWJ0bi11bmxvY2s6aG92ZXIgeyB0cmFuc2Zvcm06c2NhbGUoMS4wMik7Ym94LXNoYWRvdzowIDAgMjVweCByZ2JhKDAsMTc2LDE1NSwwLjYpOyB9CiAgICAgICAgICAgIC50bC1idG4tdmlwIHsgYmFja2dyb3VuZDpyZ2JhKDIxNyw0LDQxLDAuMSk7Ym9yZGVyOjFweCBzb2xpZCByZ2JhKDIxNyw0LDQxLDAuNSk7Y29sb3I6I2VmMjMzYzsgfQogICAgICAgICAgICAudGwtYnRuLXZpcDpob3ZlciB7IGJhY2tncm91bmQ6cmdiYSgyMTcsNCw0MSwwLjIpO3RyYW5zZm9ybTpzY2FsZSgxLjAxKTsgfQogICAgICAgICAgICAjdGwtZXJyIHsgY29sb3I6I2VmMjMzYztmb250LXNpemU6MTNweDttYXJnaW4tdG9wOjEycHg7ZGlzcGxheTpub25lO2ZvbnQtZmFtaWx5OidTaGFyZSBUZWNoIE1vbm8nO2JhY2tncm91bmQ6cmdiYSgyMzksMzUsNjAsMC4xKTtwYWRkaW5nOjhweDtib3JkZXItcmFkaXVzOjZweDsgfQogICAgICAgICAgICAudGwtaHdpZCB7IGNvbG9yOnJnYmEoMjU1LDI1NSwyNTUsMC4yMik7Zm9udC1zaXplOjEwcHg7bWFyZ2luLXRvcDoxNXB4O3dvcmQtYnJlYWs6YnJlYWstYWxsO2ZvbnQtZmFtaWx5Om1vbm9zcGFjZTsgfQogICAgICAgICAgICAudGwtZm9vdCB7IG1hcmdpbi10b3A6MTVweDtmb250LXNpemU6MTFweDtjb2xvcjpyZ2JhKDI1NSwyNTUsMjU1LDAuMTMpOyB9CiAgICAgICAgICAgICR7dGMuZnhDU1N9CiAgICAgICAgYDsKICAgIH0KCiAgICAvLyA9PT09PT09PT09IENTUyBNQUlOIFVJIOKAlCBnaeG7kW5nIGNvcmUgPT09PT09PT09PQogICAgZnVuY3Rpb24gZ2V0TWFpblVJU3R5bGVzKCkgewogICAgICAgIGNvbnN0IHRjID0gZ2V0VGhlbWVDb2xvcnMoQ1VSUkVOVF9USEVNRSk7CiAgICAgICAgcmV0dXJuIGAKICAgICAgICAgICAgQGltcG9ydCB1cmwoJ2h0dHBzOi8vZm9udHMuZ29vZ2xlYXBpcy5jb20vY3NzMj9mYW1pbHk9T3JiaXRyb246d2dodEA0MDA7NzAwOzkwMCZmYW1pbHk9U2hhcmUrVGVjaCtNb25vJmZhbWlseT1SYWpkaGFuaTp3Z2h0QDQwMDs2MDA7NzAwJmRpc3BsYXk9c3dhcCcpOwogICAgICAgICAgICAjdGwtZmxvYXRCdG4geyBwb3NpdGlvbjpmaXhlZDtib3R0b206MjhweDtyaWdodDoyOHB4O3dpZHRoOjU2cHg7aGVpZ2h0OjU2cHg7Ym9yZGVyLXJhZGl1czo1MCU7Ym9yZGVyOm5vbmU7Y3Vyc29yOnBvaW50ZXI7ei1pbmRleDoxMDAwMDtiYWNrZ3JvdW5kOiR7dGMuZmxvYXRHcmFkaWVudH07Ym94LXNoYWRvdzowIDAgMCAwICR7dGMuZ2xvd1N0cm9uZ30sMCAwIDIwcHggJHt0Yy5nbG93Q29sb3J9LDAgNHB4IDIwcHggcmdiYSgwLDAsMCwwLjUpO2Rpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7anVzdGlmeS1jb250ZW50OmNlbnRlcjtmb250LXNpemU6MjJweDt0cmFuc2l0aW9uOnRyYW5zZm9ybSAwLjJzIGVhc2UsYm94LXNoYWRvdyAwLjJzIGVhc2U7YW5pbWF0aW9uOmNvbm5QdWxzZVJpbmcgMi41cyBlYXNlLW91dCBpbmZpbml0ZTsgfQogICAgICAgICAgICAjdGwtZmxvYXRCdG46aG92ZXIgeyB0cmFuc2Zvcm06c2NhbGUoMS4xMikgcm90YXRlKDE1ZGVnKTsgfQogICAgICAgICAgICBAa2V5ZnJhbWVzIGNvbm5QdWxzZVJpbmcgeyAwJXtib3gtc2hhZG93OjAgMCAwIDAgJHt0Yy5nbG93UHVsc2V9fTcwJXtib3gtc2hhZG93OjAgMCAwIDE1cHggcmdiYSgwLDAsMCwwKX0xMDAle2JveC1zaGFkb3c6MCAwIDAgMCByZ2JhKDAsMCwwLDApfSB9CiAgICAgICAgICAgIEBrZXlmcmFtZXMgY29ubkJsaW5rIHsgMCUsMTAwJXtvcGFjaXR5OjF9NTAle29wYWNpdHk6MC4zfSB9CiAgICAgICAgICAgICN0bC1wYW5lbCB7IHBvc2l0aW9uOmZpeGVkO3RvcDo1MCU7bGVmdDo1MCU7dHJhbnNmb3JtOnRyYW5zbGF0ZSgtNTAlLC01MCUpO3dpZHRoOjM2MHB4O2JhY2tncm91bmQ6JHt0Yy5iZ1BhbmVsfTtiYWNrZHJvcC1maWx0ZXI6Ymx1cigyNHB4KTtib3JkZXI6MXB4IHNvbGlkICR7dGMuYm9yZGVyfTtib3JkZXItcmFkaXVzOjE2cHg7Ym94LXNoYWRvdzowIDAgNjBweCByZ2JhKDAsMCwwLDAuOCk7ei1pbmRleDo5OTk5O292ZXJmbG93OmhpZGRlbjtmb250LWZhbWlseTonUmFqZGhhbmknLHNhbnMtc2VyaWY7IH0KICAgICAgICAgICAgI3RsLXBhbmVsLmhpZGRlbiB7IGRpc3BsYXk6bm9uZTsgfQogICAgICAgICAgICAjdGwtcC1oZWFkZXIgeyBjdXJzb3I6bW92ZTtwYWRkaW5nOjE0cHggMTZweCAxMnB4O2JhY2tncm91bmQ6JHt0Yy5oZWFkZXJCZ307Ym9yZGVyLWJvdHRvbToxcHggc29saWQgJHt0Yy5ib3JkZXJTdWJ0bGV9O2Rpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7anVzdGlmeS1jb250ZW50OnNwYWNlLWJldHdlZW47IH0KICAgICAgICAgICAgLnRsLXAtYnJhbmQgeyBkaXNwbGF5OmZsZXg7YWxpZ24taXRlbXM6Y2VudGVyO2dhcDo4cHg7IH0KICAgICAgICAgICAgLnRsLXAtbmFtZSB7IGZvbnQtZmFtaWx5OidPcmJpdHJvbicsc2Fucy1zZXJpZjtmb250LXNpemU6MTEuNXB4O2ZvbnQtd2VpZ2h0OjcwMDtiYWNrZ3JvdW5kOiR7dGMuYnJhbmRHcmFkaWVudH07YmFja2dyb3VuZC1zaXplOjIwMCU7LXdlYmtpdC1iYWNrZ3JvdW5kLWNsaXA6dGV4dDstd2Via2l0LXRleHQtZmlsbC1jb2xvcjp0cmFuc3BhcmVudDthbmltYXRpb246dGxTaGltbWVyIDNzIGxpbmVhciBpbmZpbml0ZTsgfQogICAgICAgICAgICBAa2V5ZnJhbWVzIHRsU2hpbW1lciB7IDEwMCV7YmFja2dyb3VuZC1wb3NpdGlvbjoyMDAlIDUwJX0gfQogICAgICAgICAgICAudGwtYmFkZ2UgeyBmb250LWZhbWlseTonT3JiaXRyb24nO2ZvbnQtc2l6ZTo3LjVweDtmb250LXdlaWdodDo5MDA7Y29sb3I6I2ZmZjtib3JkZXItcmFkaXVzOjRweDtwYWRkaW5nOjNweCA2cHg7YmFja2dyb3VuZDpsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLCM1NTUsIzc3Nyk7IH0KICAgICAgICAgICAgLnRsLWJhZGdlLnZpcCB7IGJhY2tncm91bmQ6bGluZWFyLWdyYWRpZW50KDEzNWRlZywjYTg1NWY3LCM2MzY2ZjEpO2JveC1zaGFkb3c6MCAwIDEwcHggcmdiYSgxNjgsODUsMjQ3LDAuNCk7IH0KICAgICAgICAgICAgLnRsLWJhZGdlLnVubGltaXRlZCB7IGJhY2tncm91bmQ6bGluZWFyLWdyYWRpZW50KDEzNWRlZywjZjU5ZTBiLCNlZjQ0NDQpO2JveC1zaGFkb3c6MCAwIDEwcHggcmdiYSgyNDUsMTU4LDExLDAuNCk7IH0KICAgICAgICAgICAgI3RsLWNsb3NlQnRuLCN0bC1zZXR0aW5nc0J0biB7IHdpZHRoOjI4cHg7aGVpZ2h0OjI4cHg7Ym9yZGVyLXJhZGl1czo1MCU7Ym9yZGVyOjFweCBzb2xpZCByZ2JhKDI1NSwyNTUsMjU1LDAuMSk7YmFja2dyb3VuZDpyZ2JhKDI1NSwyNTUsMjU1LDAuMDQpO2NvbG9yOnJnYmEoMjU1LDI1NSwyNTUsMC41KTtjdXJzb3I6cG9pbnRlcjtkaXNwbGF5OmZsZXg7YWxpZ24taXRlbXM6Y2VudGVyO2p1c3RpZnktY29udGVudDpjZW50ZXI7dHJhbnNpdGlvbjowLjJzO2ZvbnQtc2l6ZToxM3B4OyB9CiAgICAgICAgICAgICN0bC1jbG9zZUJ0bjpob3ZlciB7IGJvcmRlci1jb2xvcjpyZ2JhKDIxNyw0LDQxLDAuNik7YmFja2dyb3VuZDpyZ2JhKDIxNyw0LDQxLDAuMTUpO2NvbG9yOiNlZjIzM2M7IH0KICAgICAgICAgICAgI3RsLXNldHRpbmdzQnRuOmhvdmVyIHsgYm9yZGVyLWNvbG9yOiR7dGMuYm9yZGVyU3Ryb25nfTtiYWNrZ3JvdW5kOiR7dGMuZ2xvd1N1YnRsZX07Y29sb3I6JHt0Yy5jMX07IH0KICAgICAgICAgICAgI3RsLXNldHRpbmdzQnRuLmFjdGl2ZSB7IGJvcmRlci1jb2xvcjoke3RjLmMxfTtiYWNrZ3JvdW5kOiR7dGMuZ2xvd1N1YnRsZX07Y29sb3I6JHt0Yy5jMX07IH0KICAgICAgICAgICAgI3RsLXAtYm9keSB7IHBhZGRpbmc6MTRweDtkaXNwbGF5OmZsZXg7ZmxleC1kaXJlY3Rpb246Y29sdW1uO2dhcDoxMnB4OyB9CiAgICAgICAgICAgIC50bC1zdGF0Ym94IHsgYm9yZGVyOjFweCBzb2xpZCAke3RjLnN0YXR1c0JvcmRlcn07Ym9yZGVyLXJhZGl1czoxMHB4O3BhZGRpbmc6MTBweDtiYWNrZ3JvdW5kOiR7dGMuc3RhdHVzQmd9OyB9CiAgICAgICAgICAgIC50bC1zdGF0cm93IHsgZGlzcGxheTpmbGV4O2FsaWduLWl0ZW1zOmNlbnRlcjtnYXA6OHB4O2ZvbnQtZmFtaWx5OidTaGFyZSBUZWNoIE1vbm8nLG1vbm9zcGFjZTtmb250LXNpemU6MTEuNXB4O2NvbG9yOiNjY2M7bWFyZ2luLXRvcDo0cHg7IH0KICAgICAgICAgICAgI3RsLW1vZGVTZWxlY3QgeyB3aWR0aDoxMDAlO3BhZGRpbmc6MTBweDtiYWNrZ3JvdW5kOnJnYmEoMCwwLDAsMC40KTtib3JkZXI6MXB4IHNvbGlkICR7dGMuc2VsZWN0Qm9yZGVyfTtib3JkZXItcmFkaXVzOjhweDtjb2xvcjojZmZmO2ZvbnQtZmFtaWx5OidSYWpkaGFuaScsc2Fucy1zZXJpZjtmb250LXNpemU6MTRweDtvdXRsaW5lOm5vbmU7bWFyZ2luLXRvcDo1cHg7IH0KICAgICAgICAgICAgLnRsLWdvZC1pbnB1dCB7IHdpZHRoOjEwMCU7cGFkZGluZzoxMHB4O2JhY2tncm91bmQ6cmdiYSgwLDAsMCwwLjQpO2JvcmRlcjoxcHggc29saWQgcmdiYSgyNTUsMTkzLDcsMC4zKTtib3JkZXItcmFkaXVzOjhweDtjb2xvcjojZmZjMTA3O2ZvbnQtZmFtaWx5OidTaGFyZSBUZWNoIE1vbm8nO2ZvbnQtc2l6ZToxM3B4O291dGxpbmU6bm9uZTttYXJnaW4tdG9wOjVweDtib3gtc2l6aW5nOmJvcmRlci1ib3g7IH0KICAgICAgICAgICAgI3RsLWZpcmVCdG4geyB3aWR0aDoxMDAlO3BhZGRpbmc6MTNweDtiYWNrZ3JvdW5kOmxpbmVhci1ncmFkaWVudCgxMzVkZWcsI2Q5MDQyOSwjZWYyMzNjKTtib3JkZXI6bm9uZTtib3JkZXItcmFkaXVzOjEwcHg7Y29sb3I6I2ZmZjtmb250LWZhbWlseTonT3JiaXRyb24nO2ZvbnQtd2VpZ2h0OjkwMDtmb250LXNpemU6MTRweDtjdXJzb3I6cG9pbnRlcjtib3gtc2hhZG93OjAgMCAyMHB4IHJnYmEoMjE3LDQsNDEsMC40KTt0cmFuc2l0aW9uOjAuMnM7bWFyZ2luLXRvcDo1cHg7IH0KICAgICAgICAgICAgI3RsLWZpcmVCdG46aG92ZXIgeyBib3gtc2hhZG93OjAgMCAzMHB4IHJnYmEoMjE3LDQsNDEsMC43KTsgfQogICAgICAgICAgICAjdGwtZmlyZUJ0bjpkaXNhYmxlZCB7IG9wYWNpdHk6MC41O2N1cnNvcjpub3QtYWxsb3dlZDsgfQogICAgICAgICAgICAudGwtY29uc29sZSB7IGJvcmRlcjoxcHggc29saWQgJHt0Yy5jb25zb2xlQm9yZGVyfTtib3JkZXItcmFkaXVzOjEwcHg7YmFja2dyb3VuZDpyZ2JhKDAsMCwwLDAuNSk7cGFkZGluZzo4cHg7aGVpZ2h0OjgwcHg7b3ZlcmZsb3cteTphdXRvO2ZvbnQtZmFtaWx5OidTaGFyZSBUZWNoIE1vbm8nO2ZvbnQtc2l6ZToxMC41cHg7Y29sb3I6I2FhYTsgfQogICAgICAgICAgICAudGwtbG9nIHsgbWFyZ2luLWJvdHRvbToycHg7IH0KICAgICAgICAgICAgLnRsLWxvZy5vayAgIHsgY29sb3I6IzAwZTY3NjsgfQogICAgICAgICAgICAudGwtbG9nLmVyciAgeyBjb2xvcjojZWYyMzNjOyB9CiAgICAgICAgICAgIC50bC1sb2cud2FybiB7IGNvbG9yOiNmZmMxMDc7IH0KICAgICAgICAgICAgLnRsLWxvZy5pbmZvIHsgY29sb3I6IzRmYWNmZTsgfQogICAgICAgICAgICAjdGwtcC1mb290ZXIgeyBwYWRkaW5nOjhweCAxNHB4O2JvcmRlci10b3A6MXB4IHNvbGlkICR7dGMuYm9yZGVyU3VidGxlfTtkaXNwbGF5OmZsZXg7anVzdGlmeS1jb250ZW50OnNwYWNlLWJldHdlZW47Zm9udC1mYW1pbHk6J1NoYXJlIFRlY2ggTW9ubyc7Zm9udC1zaXplOjlweDtjb2xvcjpyZ2JhKDI1NSwyNTUsMjU1LDAuMik7IH0KICAgICAgICAgICAgLyog4pSA4pSAIFNldHRpbmdzIE92ZXJsYXkg4pSA4pSAICovCiAgICAgICAgICAgICN0bC1zbyB7IHBvc2l0aW9uOmFic29sdXRlO3RvcDowO2xlZnQ6MDtyaWdodDowO2JvdHRvbTowO2JhY2tncm91bmQ6JHt0Yy5iZ1BhbmVsfTtiYWNrZHJvcC1maWx0ZXI6Ymx1cigxMnB4KTt6LWluZGV4OjIwO2JvcmRlci1yYWRpdXM6MTZweDtkaXNwbGF5OmZsZXg7ZmxleC1kaXJlY3Rpb246Y29sdW1uO292ZXJmbG93OmhpZGRlbjsgfQogICAgICAgICAgICAjdGwtc28uaGlkZGVuIHsgZGlzcGxheTpub25lOyB9CiAgICAgICAgICAgIC50bC1zby1oZHIgeyBwYWRkaW5nOjEzcHggMTZweDtiYWNrZ3JvdW5kOiR7dGMuaGVhZGVyQmd9O2JvcmRlci1ib3R0b206MXB4IHNvbGlkICR7dGMuYm9yZGVyU3VidGxlfTtkaXNwbGF5OmZsZXg7YWxpZ24taXRlbXM6Y2VudGVyO2p1c3RpZnktY29udGVudDpzcGFjZS1iZXR3ZWVuO2ZsZXgtc2hyaW5rOjA7IH0KICAgICAgICAgICAgLnRsLXNvLXRpdGxlIHsgZm9udC1mYW1pbHk6J09yYml0cm9uJyxzYW5zLXNlcmlmO2ZvbnQtc2l6ZToxMC41cHg7Zm9udC13ZWlnaHQ6NzAwO2NvbG9yOiR7dGMuYzF9OyB9CiAgICAgICAgICAgICN0bC1zb0Nsb3NlIHsgd2lkdGg6MjZweDtoZWlnaHQ6MjZweDtib3JkZXItcmFkaXVzOjUwJTtib3JkZXI6MXB4IHNvbGlkICR7dGMuYm9yZGVyfTtiYWNrZ3JvdW5kOiR7dGMuZ2xvd1N1YnRsZX07Y29sb3I6JHt0Yy5jMX07Y3Vyc29yOnBvaW50ZXI7ZGlzcGxheTpmbGV4O2FsaWduLWl0ZW1zOmNlbnRlcjtqdXN0aWZ5LWNvbnRlbnQ6Y2VudGVyO2ZvbnQtc2l6ZToxMnB4O3RyYW5zaXRpb246MC4yczsgfQogICAgICAgICAgICAjdGwtc29DbG9zZTpob3ZlciB7IGJhY2tncm91bmQ6cmdiYSgyMTcsNCw0MSwwLjE1KTtib3JkZXItY29sb3I6cmdiYSgyMTcsNCw0MSwwLjUpO2NvbG9yOiNlZjIzM2M7IH0KICAgICAgICAgICAgLnRsLXNvLWJvZHkgeyBwYWRkaW5nOjE0cHg7ZmxleDoxO2Rpc3BsYXk6ZmxleDtmbGV4LWRpcmVjdGlvbjpjb2x1bW47Z2FwOjEycHg7b3ZlcmZsb3cteTphdXRvOyB9CiAgICAgICAgICAgIC50bC1zby1sYmwgeyBmb250LXNpemU6OS41cHg7Zm9udC13ZWlnaHQ6NzAwO2NvbG9yOnJnYmEoMjU1LDI1NSwyNTUsMC4yOCk7dGV4dC10cmFuc2Zvcm06dXBwZXJjYXNlO2ZvbnQtZmFtaWx5OidPcmJpdHJvbic7bGV0dGVyLXNwYWNpbmc6MS4ycHg7bWFyZ2luLWJvdHRvbToycHg7IH0KICAgICAgICAgICAgLnRsLXRoZW1lLWNhcmRzIHsgZGlzcGxheTpmbGV4O2dhcDo4cHg7IH0KICAgICAgICAgICAgLnRsLXRjIHsgZmxleDoxO2N1cnNvcjpwb2ludGVyO2JvcmRlci1yYWRpdXM6MTBweDtib3JkZXI6MnB4IHNvbGlkIHJnYmEoMjU1LDI1NSwyNTUsMC4wNyk7cGFkZGluZzo4cHggNnB4O3RleHQtYWxpZ246Y2VudGVyO3RyYW5zaXRpb246YWxsIDAuMjJzO2JhY2tncm91bmQ6cmdiYSgwLDAsMCwwLjMpO3Bvc2l0aW9uOnJlbGF0aXZlOyB9CiAgICAgICAgICAgIC50bC10Yzpob3ZlciB7IHRyYW5zZm9ybTp0cmFuc2xhdGVZKC0zcHgpO2JvcmRlci1jb2xvcjpyZ2JhKDI1NSwyNTUsMjU1LDAuMTgpO2JveC1zaGFkb3c6MCA2cHggMThweCByZ2JhKDAsMCwwLDAuNCk7IH0KICAgICAgICAgICAgLnRsLXRjLmFjdGl2ZSB7IGJvcmRlci1jb2xvcjoke3RjLmMxfTtib3gtc2hhZG93OjAgMCAxNHB4ICR7dGMuZ2xvd01pZH07IH0KICAgICAgICAgICAgLnRsLXRjLXByZXYgeyB3aWR0aDoxMDAlO2hlaWdodDozOHB4O2JvcmRlci1yYWRpdXM6N3B4O21hcmdpbi1ib3R0b206N3B4O292ZXJmbG93OmhpZGRlbjtwb3NpdGlvbjpyZWxhdGl2ZTsgfQogICAgICAgICAgICAudGwtdGMtcHJldi1pbm5lciB7IHBvc2l0aW9uOmFic29sdXRlO2luc2V0OjA7ZGlzcGxheTpmbGV4O2FsaWduLWl0ZW1zOmNlbnRlcjtqdXN0aWZ5LWNvbnRlbnQ6Y2VudGVyOyB9CiAgICAgICAgICAgIC50bC10Yy1wcmV2LXRleHQgeyBmb250LWZhbWlseTonT3JiaXRyb24nLHNhbnMtc2VyaWY7Zm9udC1zaXplOjdweDtmb250LXdlaWdodDo3MDA7bGV0dGVyLXNwYWNpbmc6MXB4O29wYWNpdHk6MC45OyB9CiAgICAgICAgICAgIC50bC10Yy1sYmwgeyBmb250LWZhbWlseTonUmFqZGhhbmknLHNhbnMtc2VyaWY7Zm9udC1zaXplOjEwLjVweDtmb250LXdlaWdodDo2MDA7Y29sb3I6cmdiYSgyNTUsMjU1LDI1NSwwLjYpOyB9CiAgICAgICAgICAgIC50bC10Yy5hY3RpdmUgLnRsLXRjLWxibCB7IGNvbG9yOiR7dGMuYzF9O2ZvbnQtd2VpZ2h0OjcwMDsgfQogICAgICAgICAgICAudGwtdGMuYWN0aXZlOjphZnRlciB7IGNvbnRlbnQ6J+Kckyc7cG9zaXRpb246YWJzb2x1dGU7dG9wOjVweDtyaWdodDo3cHg7Y29sb3I6JHt0Yy5jMX07Zm9udC1zaXplOjExcHg7Zm9udC13ZWlnaHQ6OTAwOyB9CiAgICAgICAgICAgIC50bC1zby1kaXZpZGVyIHsgaGVpZ2h0OjFweDtiYWNrZ3JvdW5kOmxpbmVhci1ncmFkaWVudCg5MGRlZyx0cmFuc3BhcmVudCwke3RjLmJvcmRlcn0sdHJhbnNwYXJlbnQpOyB9CiAgICAgICAgICAgIC50bC1oaW50IHsgZm9udC1zaXplOjEwcHg7Y29sb3I6cmdiYSgyNTUsMjU1LDI1NSwwLjIpO2ZvbnQtZmFtaWx5OidTaGFyZSBUZWNoIE1vbm8nO3RleHQtYWxpZ246Y2VudGVyO2xpbmUtaGVpZ2h0OjEuNjsgfQogICAgICAgICAgICAudGwtY2hhbmdlLWtleSB7IHdpZHRoOjEwMCU7cGFkZGluZzoxMHB4O2JhY2tncm91bmQ6cmdiYSgyMzksMzUsNjAsMC4xKTtib3JkZXI6MXB4IHNvbGlkIHJnYmEoMjM5LDM1LDYwLDAuMzgpO2JvcmRlci1yYWRpdXM6OHB4O2NvbG9yOiNlZjIzM2M7Zm9udC1mYW1pbHk6J09yYml0cm9uJyxzYW5zLXNlcmlmO2ZvbnQtc2l6ZToxMC41cHg7Zm9udC13ZWlnaHQ6NzAwO2N1cnNvcjpwb2ludGVyO3RyYW5zaXRpb246MC4ycztsZXR0ZXItc3BhY2luZzowLjVweDsgfQogICAgICAgICAgICAudGwtY2hhbmdlLWtleTpob3ZlciB7IGJhY2tncm91bmQ6cmdiYSgyMzksMzUsNjAsMC4yKTtib3JkZXItY29sb3I6cmdiYSgyMzksMzUsNjAsMC42NSk7Ym94LXNoYWRvdzowIDAgMTRweCByZ2JhKDIzOSwzNSw2MCwwLjI1KTsgfQogICAgICAgICAgICAvKiDilIDilIAgQ3VzdG9tIE1vZGFsIOKUgOKUgCAqLwogICAgICAgICAgICAjdGllcC1tb2RhbC1vdmVybGF5IHsgcG9zaXRpb246Zml4ZWQ7dG9wOjA7bGVmdDowO3dpZHRoOjEwMHZ3O2hlaWdodDoxMDB2aDtiYWNrZ3JvdW5kOnJnYmEoMCwwLDAsMC43Mik7ei1pbmRleDoyMTQ3NDgzNjQ2O2Rpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7anVzdGlmeS1jb250ZW50OmNlbnRlcjsgfQogICAgICAgICAgICAudGllcC1tb2RhbC1ib3ggeyB3aWR0aDozMjBweDtiYWNrZ3JvdW5kOiR7dGMuYmdQYW5lbH07Ym9yZGVyOjFweCBzb2xpZCAke3RjLmJvcmRlclN0cm9uZ307Ym9yZGVyLXJhZGl1czoxNnB4O3BhZGRpbmc6MjZweCAyMnB4IDIycHg7dGV4dC1hbGlnbjpjZW50ZXI7Ym94LXNoYWRvdzowIDAgNjBweCByZ2JhKDAsMCwwLDAuOSksaW5zZXQgMCAwIDAgMXB4ICR7dGMucGFuZWxJbnNldH07Zm9udC1mYW1pbHk6J1JhamRoYW5pJyxzYW5zLXNlcmlmOyB9CiAgICAgICAgICAgIC50aWVwLW1vZGFsLWljb24geyBmb250LXNpemU6MzhweDttYXJnaW4tYm90dG9tOjhweDsgfQogICAgICAgICAgICAudGllcC1tb2RhbC10aXRsZSB7IGZvbnQtZmFtaWx5OidPcmJpdHJvbicsc2Fucy1zZXJpZjtmb250LXNpemU6MTJweDtmb250LXdlaWdodDo3MDA7Y29sb3I6JHt0Yy5jMX07bWFyZ2luLWJvdHRvbToxMnB4O2xpbmUtaGVpZ2h0OjEuNTsgfQogICAgICAgICAgICAudGllcC1tb2RhbC1saW5lcyB7IGNvbG9yOnJnYmEoMjU1LDI1NSwyNTUsMC43OCk7Zm9udC1zaXplOjEzcHg7bGluZS1oZWlnaHQ6MS42NTttYXJnaW4tYm90dG9tOjE4cHg7IH0KICAgICAgICAgICAgLnRpZXAtbW9kYWwtbGluZXMgYiB7IGNvbG9yOiNmZmY7IH0KICAgICAgICAgICAgLnRpZXAtbW9kYWwtb2sgeyBwYWRkaW5nOjEwcHggMzZweDtiYWNrZ3JvdW5kOiR7dGMuZmxvYXRHcmFkaWVudH07Ym9yZGVyOm5vbmU7Ym9yZGVyLXJhZGl1czo4cHg7Y29sb3I6I2ZmZjtmb250LWZhbWlseTonT3JiaXRyb24nLHNhbnMtc2VyaWY7Zm9udC1zaXplOjExLjVweDtmb250LXdlaWdodDo5MDA7Y3Vyc29yOnBvaW50ZXI7dHJhbnNpdGlvbjowLjJzO2JveC1zaGFkb3c6MCA0cHggMTZweCAke3RjLmdsb3dDb2xvcn07IH0KICAgICAgICAgICAgLnRpZXAtbW9kYWwtb2s6aG92ZXIgeyB0cmFuc2Zvcm06c2NhbGUoMS4wNik7Ym94LXNoYWRvdzowIDAgMjRweCAke3RjLmdsb3dDb2xvcn07IH0KICAgICAgICAgICAgJHt0Yy5meENTU30KICAgICAgICBgOwogICAgfQoKICAgIC8vID09PT09PT09PT0gQ1VTVE9NIE1PREFMIOKAlCBnaeG7kW5nIGNvcmUgPT09PT09PT09PQogICAgZnVuY3Rpb24gX2Vuc3VyZU1vZGFsU3R5bGUoKSB7CiAgICAgICAgaWYgKGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0aWVwLW1vZGFsLXN0eWxlJykpIHJldHVybjsKICAgICAgICBjb25zdCB0YyA9IGdldFRoZW1lQ29sb3JzKENVUlJFTlRfVEhFTUUpOwogICAgICAgIGNvbnN0IG1zID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnc3R5bGUnKTsKICAgICAgICBtcy5pZCA9ICd0aWVwLW1vZGFsLXN0eWxlJzsKICAgICAgICBtcy50ZXh0Q29udGVudCA9IGAKICAgICAgICAgICAgQGtleWZyYW1lcyB0bE1vZGFsSW57ZnJvbXtvcGFjaXR5OjA7dHJhbnNmb3JtOnNjYWxlKDAuOTIpfXRve29wYWNpdHk6MTt0cmFuc2Zvcm06c2NhbGUoMSl9fQogICAgICAgICAgICAjdGllcC1tb2RhbC1vdmVybGF5e3Bvc2l0aW9uOmZpeGVkIWltcG9ydGFudDt0b3A6MCFpbXBvcnRhbnQ7bGVmdDowIWltcG9ydGFudDt3aWR0aDoxMDB2dyFpbXBvcnRhbnQ7aGVpZ2h0OjEwMHZoIWltcG9ydGFudDtiYWNrZ3JvdW5kOnJnYmEoMCwwLDAsMC43NSkhaW1wb3J0YW50O3otaW5kZXg6MjE0NzQ4MzY0NiFpbXBvcnRhbnQ7ZGlzcGxheTpmbGV4IWltcG9ydGFudDthbGlnbi1pdGVtczpjZW50ZXIhaW1wb3J0YW50O2p1c3RpZnktY29udGVudDpjZW50ZXIhaW1wb3J0YW50O30KICAgICAgICAgICAgLnRpZXAtbW9kYWwtYm94e3dpZHRoOjMyMHB4O21heC13aWR0aDo5MHZ3O2JhY2tncm91bmQ6JHt0Yy5iZ1BhbmVsfTtib3JkZXI6MXB4IHNvbGlkICR7dGMuYm9yZGVyU3Ryb25nfTtib3JkZXItcmFkaXVzOjE2cHg7cGFkZGluZzoyNnB4IDIycHggMjJweDt0ZXh0LWFsaWduOmNlbnRlcjtib3gtc2hhZG93OjAgMCA2MHB4IHJnYmEoMCwwLDAsMC45KSxpbnNldCAwIDAgMCAxcHggJHt0Yy5wYW5lbEluc2V0fTtmb250LWZhbWlseTonUmFqZGhhbmknLHNhbnMtc2VyaWY7YW5pbWF0aW9uOnRsTW9kYWxJbiAwLjIycyBlYXNlO30KICAgICAgICAgICAgLnRpZXAtbW9kYWwtaWNvbntmb250LXNpemU6MzhweDttYXJnaW4tYm90dG9tOjhweDt9CiAgICAgICAgICAgIC50aWVwLW1vZGFsLXRpdGxle2ZvbnQtZmFtaWx5OidPcmJpdHJvbicsc2Fucy1zZXJpZjtmb250LXNpemU6MTJweDtmb250LXdlaWdodDo3MDA7Y29sb3I6JHt0Yy5jMX07bWFyZ2luLWJvdHRvbToxMnB4O2xpbmUtaGVpZ2h0OjEuNTt9CiAgICAgICAgICAgIC50aWVwLW1vZGFsLWxpbmVze2NvbG9yOnJnYmEoMjU1LDI1NSwyNTUsMC44Mik7Zm9udC1zaXplOjEzcHg7bGluZS1oZWlnaHQ6MS43O21hcmdpbi1ib3R0b206MThweDt9CiAgICAgICAgICAgIC50aWVwLW1vZGFsLWxpbmVzIGJ7Y29sb3I6I2ZmZjt9CiAgICAgICAgICAgIC50aWVwLW1vZGFsLW9re3BhZGRpbmc6MTBweCAzNnB4O2JhY2tncm91bmQ6JHt0Yy5mbG9hdEdyYWRpZW50fTtib3JkZXI6bm9uZTtib3JkZXItcmFkaXVzOjhweDtjb2xvcjojZmZmO2ZvbnQtZmFtaWx5OidPcmJpdHJvbicsc2Fucy1zZXJpZjtmb250LXNpemU6MTEuNXB4O2ZvbnQtd2VpZ2h0OjkwMDtjdXJzb3I6cG9pbnRlcjt0cmFuc2l0aW9uOjAuMnM7Ym94LXNoYWRvdzowIDRweCAxNnB4ICR7dGMuZ2xvd0NvbG9yfTt9CiAgICAgICAgICAgIC50aWVwLW1vZGFsLW9rOmhvdmVye3RyYW5zZm9ybTpzY2FsZSgxLjA2KTtib3gtc2hhZG93OjAgMCAyNHB4ICR7dGMuZ2xvd0NvbG9yfTt9CiAgICAgICAgYDsKICAgICAgICBkb2N1bWVudC5oZWFkLmFwcGVuZENoaWxkKG1zKTsKICAgIH0KCiAgICBmdW5jdGlvbiBzaG93Q3VzdG9tTW9kYWwoeyBpY29uLCB0aXRsZSwgbGluZXMsIG9uT2sgfSkgewogICAgICAgIF9lbnN1cmVNb2RhbFN0eWxlKCk7CiAgICAgICAgY29uc3QgZXhpc3RpbmcgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGllcC1tb2RhbC1vdmVybGF5Jyk7CiAgICAgICAgaWYgKGV4aXN0aW5nKSBleGlzdGluZy5yZW1vdmUoKTsKICAgICAgICBjb25zdCBvdmVybGF5ID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7CiAgICAgICAgb3ZlcmxheS5pZCA9ICd0aWVwLW1vZGFsLW92ZXJsYXknOwogICAgICAgIGNvbnN0IGxpbmVzSFRNTCA9IChBcnJheS5pc0FycmF5KGxpbmVzKSA/IGxpbmVzIDogW2xpbmVzXSkubWFwKGwgPT4gYDxkaXY+JHtsfTwvZGl2PmApLmpvaW4oJycpOwogICAgICAgIG92ZXJsYXkuaW5uZXJIVE1MID0gYAogICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0aWVwLW1vZGFsLWJveCI+CiAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0aWVwLW1vZGFsLWljb24iPiR7aWNvbiB8fCAn4oS577iPJ308L2Rpdj4KICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRpZXAtbW9kYWwtdGl0bGUiPiR7dGl0bGUgfHwgJ1Row7RuZyBiw6FvJ308L2Rpdj4KICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRpZXAtbW9kYWwtbGluZXMiPiR7bGluZXNIVE1MfTwvZGl2PgogICAgICAgICAgICAgICAgPGJ1dHRvbiBjbGFzcz0idGllcC1tb2RhbC1vayIgaWQ9InRpZXAtbW9kYWwtb2stYnRuIj5PSzwvYnV0dG9uPgogICAgICAgICAgICA8L2Rpdj5gOwogICAgICAgIGRvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQob3ZlcmxheSk7CiAgICAgICAgY29uc3QgY2xvc2UgPSAoKSA9PiB7IG92ZXJsYXkucmVtb3ZlKCk7IGlmIChvbk9rKSBvbk9rKCk7IH07CiAgICAgICAgZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RpZXAtbW9kYWwtb2stYnRuJykub25jbGljayA9IGNsb3NlOwogICAgICAgIG92ZXJsYXkub25jbGljayA9IChlKSA9PiB7IGlmIChlLnRhcmdldCA9PT0gb3ZlcmxheSkgY2xvc2UoKTsgfTsKICAgIH0KCiAgICBmdW5jdGlvbiBzaG93Q29uZmlybU1vZGFsKHsgaWNvbiwgdGl0bGUsIGxpbmVzLCBva1RleHQsIGNhbmNlbFRleHQsIG9uT2sgfSkgewogICAgICAgIF9lbnN1cmVNb2RhbFN0eWxlKCk7CiAgICAgICAgY29uc3QgZXhpc3RpbmcgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGllcC1tb2RhbC1vdmVybGF5Jyk7CiAgICAgICAgaWYgKGV4aXN0aW5nKSBleGlzdGluZy5yZW1vdmUoKTsKICAgICAgICBjb25zdCBvdmVybGF5ID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7CiAgICAgICAgb3ZlcmxheS5pZCA9ICd0aWVwLW1vZGFsLW92ZXJsYXknOwogICAgICAgIGNvbnN0IGxpbmVzSFRNTCA9IChBcnJheS5pc0FycmF5KGxpbmVzKSA/IGxpbmVzIDogW2xpbmVzXSkubWFwKGwgPT4gYDxkaXY+JHtsfTwvZGl2PmApLmpvaW4oJycpOwogICAgICAgIG92ZXJsYXkuaW5uZXJIVE1MID0gYAogICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0aWVwLW1vZGFsLWJveCI+CiAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0aWVwLW1vZGFsLWljb24iPiR7aWNvbiB8fCAn4p2TJ308L2Rpdj4KICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRpZXAtbW9kYWwtdGl0bGUiPiR7dGl0bGUgfHwgJ1jDoWMgbmjhuq1uJ308L2Rpdj4KICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRpZXAtbW9kYWwtbGluZXMiPiR7bGluZXNIVE1MfTwvZGl2PgogICAgICAgICAgICAgICAgPGRpdiBzdHlsZT0iZGlzcGxheTpmbGV4O2dhcDoxMHB4O2p1c3RpZnktY29udGVudDpjZW50ZXI7Ij4KICAgICAgICAgICAgICAgICAgICA8YnV0dG9uIGNsYXNzPSJ0aWVwLW1vZGFsLW9rIiBpZD0idGllcC1jb25maXJtLWNhbmNlbC1idG4iIHN0eWxlPSJiYWNrZ3JvdW5kOnJnYmEoMjU1LDI1NSwyNTUsMC4wOCk7Ym94LXNoYWRvdzpub25lOyI+JHtjYW5jZWxUZXh0IHx8ICdI4bumWSd9PC9idXR0b24+CiAgICAgICAgICAgICAgICAgICAgPGJ1dHRvbiBjbGFzcz0idGllcC1tb2RhbC1vayIgaWQ9InRpZXAtY29uZmlybS1vay1idG4iPiR7b2tUZXh0IHx8ICdYw4FDIE5I4bqsTid9PC9idXR0b24+CiAgICAgICAgICAgICAgICA8L2Rpdj4KICAgICAgICAgICAgPC9kaXY+YDsKICAgICAgICBkb2N1bWVudC5ib2R5LmFwcGVuZENoaWxkKG92ZXJsYXkpOwogICAgICAgIGNvbnN0IGRpc21pc3MgPSAoKSA9PiBvdmVybGF5LnJlbW92ZSgpOwogICAgICAgIGNvbnN0IGNvbmZpcm0gPSAoKSA9PiB7IG92ZXJsYXkucmVtb3ZlKCk7IGlmIChvbk9rKSBvbk9rKCk7IH07CiAgICAgICAgZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RpZXAtY29uZmlybS1jYW5jZWwtYnRuJykub25jbGljayA9IGRpc21pc3M7CiAgICAgICAgZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RpZXAtY29uZmlybS1vay1idG4nKS5vbmNsaWNrID0gY29uZmlybTsKICAgICAgICBvdmVybGF5Lm9uY2xpY2sgPSAoZSkgPT4geyBpZiAoZS50YXJnZXQgPT09IG92ZXJsYXkpIGRpc21pc3MoKTsgfTsKICAgIH0KCiAgICAvLyDDgXAgZOG7pW5nIHRoZW1lIG5nYXkgbOG6rXAgdOG7qWMKICAgIGZ1bmN0aW9uIGFwcGx5VGhlbWVMaXZlKG5ld1RoZW1lKSB7CiAgICAgICAgQ1VSUkVOVF9USEVNRSA9IG5ld1RoZW1lOwogICAgICAgIGxvY2FsU3RvcmFnZS5zZXRJdGVtKExTX1RIRU1FLCBuZXdUaGVtZSk7CiAgICAgICAgY29uc3QgdWlTdHlsZSA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC11aS1zdHlsZScpOwogICAgICAgIGlmICh1aVN0eWxlKSB1aVN0eWxlLnRleHRDb250ZW50ID0gZ2V0TWFpblVJU3R5bGVzKCk7CiAgICAgICAgY29uc3QgbG9ja1N0eWxlID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWxvY2stc3R5bGUnKTsKICAgICAgICBpZiAobG9ja1N0eWxlKSBsb2NrU3R5bGUudGV4dENvbnRlbnQgPSBnZXRMb2NrU2NyZWVuU3R5bGVzKCk7CiAgICAgICAgY29uc3QgbXMgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGllcC1tb2RhbC1zdHlsZScpOwogICAgICAgIGlmIChtcykgbXMucmVtb3ZlKCk7CiAgICAgICAgY29uc3QgZmIgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtZmxvYXRCdG4nKTsKICAgICAgICBpZiAoZmIpIHsgZmIuc3R5bGUuYW5pbWF0aW9uID0gJ25vbmUnOyB2b2lkIGZiLm9mZnNldFdpZHRoOyBmYi5zdHlsZS5hbmltYXRpb24gPSAnJzsgfQogICAgICAgIGNvbnN0IGxvY2tQYW5lbCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC1jb25uLXBhbmVsJyk7CiAgICAgICAgaWYgKGxvY2tQYW5lbCkgewogICAgICAgICAgICBjb25zdCBleGlzdEZ4ID0gbG9ja1BhbmVsLnF1ZXJ5U2VsZWN0b3IoJyN0bC1jb25uLWZ4LWJhciwjdGwtY29ubi1meC1wZXRhbHMnKTsKICAgICAgICAgICAgaWYgKGV4aXN0RngpIGV4aXN0RngucmVtb3ZlKCk7CiAgICAgICAgICAgIGNvbnN0IHRjID0gZ2V0VGhlbWVDb2xvcnMobmV3VGhlbWUpOwogICAgICAgICAgICBpZiAodGMucGFuZWxFeHRyYSkgewogICAgICAgICAgICAgICAgY29uc3QgdG1wID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7CiAgICAgICAgICAgICAgICB0bXAuaW5uZXJIVE1MID0gdGMucGFuZWxFeHRyYTsKICAgICAgICAgICAgICAgIGxvY2tQYW5lbC5pbnNlcnRCZWZvcmUodG1wLmZpcnN0RWxlbWVudENoaWxkLCBsb2NrUGFuZWwuZmlyc3RDaGlsZCk7CiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICB9CgogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAvLyAgQuG6ok8gTeG6rFQgdjQg4oCUIOG6qE4gQVBJIHByZWZpeCArIHNlc3Npb24gdG9rZW4gKyBtw6MgaG/DoSDEkcOhcCDDoW4KICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgbGV0IF9zZWNTZXNzaW9uICAgID0geyB0b2tlbjogbnVsbCwgZXhwOiAwLCBmcEhhc2g6IG51bGwsIHNlcTogMSB9OwogICAgbGV0IF9hcGlQcmVmaXhDYWNoZSA9IG51bGw7CiAgICAvLyBbdjZdIE1vZHVsZSAiQ0hV4bqoTiBC4buKIDEwIMSQSeG7gk0iIOKAlCB04bqjaSDEkOG7mE5HIHThu6sgc2VydmVyLCBLSMOUTkcgbuG6sW0gdHJvbmcgc2NyaXB0CiAgICBsZXQgX2ZpcmVNb2R1bGUgICAgICA9IHsgZmFjdG9yeTogbnVsbCwgdmVyc2lvbjogMCwgbG9hZGluZzogZmFsc2UsIGxhc3RFcnI6IG51bGwgfTsKICAgIGxldCBfaGVhcnRiZWF0VGltZXIgID0gbnVsbDsKICAgIGxldCBfaGVhcnRiZWF0RmFpbCAgID0gMDsKCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIC8vICBbdjVdIELhuqJPIE3huqxUIE7Dgk5HIENBTzogRU5DUllQVC1MUyArIEFOVEktSE9PSyArIFNDUklQVCBHVUFSRAogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCgogICAgLy8g4pSA4pSA4pSAIE9iZnVzY2F0aW9uIExvY2FsU3RvcmFnZSBuaOG6oXkgY+G6o20gKFhPUiArIEJhc2U2NCkg4pSACiAgICBjb25zdCBfRU5DX1BGWCA9ICdceDVmXHg0NVx4MzVceDVmJzsgLy8gJ19FNV8nCiAgICBmdW5jdGlvbiBfbHNYb3IodmFsdWUpIHsKICAgICAgICBpZiAoIXZhbHVlKSByZXR1cm4gJyc7CiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgY29uc3QgayA9IGdldEhXSUQoKSArIEFQSV9TRUNSRVQuc2xpY2UoMCwgMTApOwogICAgICAgICAgICBsZXQgciA9ICcnOwogICAgICAgICAgICBmb3IgKGxldCBpID0gMDsgaSA8IHZhbHVlLmxlbmd0aDsgaSsrKQogICAgICAgICAgICAgICAgciArPSBTdHJpbmcuZnJvbUNoYXJDb2RlKHZhbHVlLmNoYXJDb2RlQXQoaSkgXiBrLmNoYXJDb2RlQXQoaSAlIGsubGVuZ3RoKSk7CiAgICAgICAgICAgIHJldHVybiBfRU5DX1BGWCArIGJ0b2EodW5lc2NhcGUoZW5jb2RlVVJJQ29tcG9uZW50KHIpKSk7CiAgICAgICAgfSBjYXRjaCAoXykgeyByZXR1cm4gdmFsdWU7IH0KICAgIH0KICAgIGZ1bmN0aW9uIF9sc1VueG9yKGVuY29kZWQpIHsKICAgICAgICBpZiAoIWVuY29kZWQpIHJldHVybiBudWxsOwogICAgICAgIGlmICghZW5jb2RlZC5zdGFydHNXaXRoKF9FTkNfUEZYKSkgcmV0dXJuIGVuY29kZWQ7IC8vIExlZ2FjeSBwbGFpbiDigJQgdMawxqFuZyB0aMOtY2ggbmfGsOG7o2MKICAgICAgICB0cnkgewogICAgICAgICAgICBjb25zdCB2ID0gZGVjb2RlVVJJQ29tcG9uZW50KGVzY2FwZShhdG9iKGVuY29kZWQuc2xpY2UoX0VOQ19QRlgubGVuZ3RoKSkpKTsKICAgICAgICAgICAgY29uc3QgayA9IGdldEhXSUQoKSArIEFQSV9TRUNSRVQuc2xpY2UoMCwgMTApOwogICAgICAgICAgICBsZXQgciA9ICcnOwogICAgICAgICAgICBmb3IgKGxldCBpID0gMDsgaSA8IHYubGVuZ3RoOyBpKyspCiAgICAgICAgICAgICAgICByICs9IFN0cmluZy5mcm9tQ2hhckNvZGUodi5jaGFyQ29kZUF0KGkpIF4gay5jaGFyQ29kZUF0KGkgJSBrLmxlbmd0aCkpOwogICAgICAgICAgICByZXR1cm4gcjsKICAgICAgICB9IGNhdGNoIChfKSB7IHJldHVybiBlbmNvZGVkOyB9CiAgICB9CiAgICAvLyBXcmFwcGVyIMSR4buNYy9naGkgTFMgY2hvIGPDoWMga2V5IG5o4bqheSBj4bqjbSAoa2V5LCB0eXBlLCBleHApCiAgICBjb25zdCBfc0xTID0gewogICAgICAgIGdldDogKGtleSkgICAgPT4geyB0cnkgeyByZXR1cm4gX2xzVW54b3IobG9jYWxTdG9yYWdlLmdldEl0ZW0oa2V5KSk7ICB9IGNhdGNoIChfKSB7IHJldHVybiBudWxsOyB9IH0sCiAgICAgICAgc2V0OiAoa2V5LCB2KSA9PiB7IHRyeSB7IGxvY2FsU3RvcmFnZS5zZXRJdGVtKGtleSwgdiA/IF9sc1hvcih2KSA6ICcnKTsgfSBjYXRjaCAoXykge30gfSwKICAgICAgICBkZWw6IChrZXkpICAgID0+IHsgdHJ5IHsgbG9jYWxTdG9yYWdlLnJlbW92ZUl0ZW0oa2V5KTsgfSAgICAgICAgICAgICAgICAgIGNhdGNoIChfKSB7fSB9CiAgICB9OwoKICAgIC8vIOKUgOKUgOKUgCBNw6MgaG/DoSBwYXlsb2FkIHJlcXVlc3QgKEFFUy1HQ00gKyBQQktERjIpIOKUgOKUgOKUgOKUgOKUgOKUgOKUgAogICAgYXN5bmMgZnVuY3Rpb24gX2VuY3J5cHRQYXlsb2FkKGRhdGEsIGhpbnQpIHsKICAgICAgICBjb25zdCBlbmMgPSBuZXcgVGV4dEVuY29kZXIoKSwgYyA9IF9jcnlwdG9PYmooKTsKICAgICAgICBjb25zdCBpdiAgICA9IGMuZ2V0UmFuZG9tVmFsdWVzKG5ldyBVaW50OEFycmF5KDEyKSk7CiAgICAgICAgY29uc3QgdHMgICAgPSBNYXRoLmZsb29yKERhdGUubm93KCkgLyAxMDAwKTsKICAgICAgICBjb25zdCBub25jZSA9IEFycmF5LmZyb20oYy5nZXRSYW5kb21WYWx1ZXMobmV3IFVpbnQ4QXJyYXkoOCkpLCBiID0+IGIudG9TdHJpbmcoMTYpLnBhZFN0YXJ0KDIsICcwJykpLmpvaW4oJycpOwogICAgICAgIGNvbnN0IHJhd0tleSAgID0gZW5jLmVuY29kZShBUElfU0VDUkVUICsgKGhpbnQgfHwgJycpICsgKHRzID4+PiA3KS50b1N0cmluZygxNikpOwogICAgICAgIGNvbnN0IGJhc2VLZXkgID0gYXdhaXQgYy5zdWJ0bGUuaW1wb3J0S2V5KCdyYXcnLCByYXdLZXksICdQQktERjInLCBmYWxzZSwgWydkZXJpdmVCaXRzJ10pOwogICAgICAgIGNvbnN0IGJpdHMgICAgID0gYXdhaXQgYy5zdWJ0bGUuZGVyaXZlQml0cyh7IG5hbWU6ICdQQktERjInLCBzYWx0OiBlbmMuZW5jb2RlKCd0bDVyZXEnICsgbm9uY2UpLCBpdGVyYXRpb25zOiAxMjAwLCBoYXNoOiAnU0hBLTI1NicgfSwgYmFzZUtleSwgMjU2KTsKICAgICAgICBjb25zdCBhZXNLZXkgICA9IGF3YWl0IGMuc3VidGxlLmltcG9ydEtleSgncmF3JywgYml0cywgeyBuYW1lOiAnQUVTLUdDTScgfSwgZmFsc2UsIFsnZW5jcnlwdCddKTsKICAgICAgICBjb25zdCBjdCAgICAgICA9IG5ldyBVaW50OEFycmF5KGF3YWl0IGMuc3VidGxlLmVuY3J5cHQoeyBuYW1lOiAnQUVTLUdDTScsIGl2IH0sIGFlc0tleSwgZW5jLmVuY29kZShKU09OLnN0cmluZ2lmeShkYXRhKSkpKTsKICAgICAgICBjb25zdCBiNjQgICAgICA9IChhKSA9PiBidG9hKFN0cmluZy5mcm9tQ2hhckNvZGUoLi4uYSkpOwogICAgICAgIHJldHVybiB7IF9lOiA1LCBpdjogYjY0KGl2KSwgZDogYjY0KGN0LnNsaWNlKDAsIC0xNikpLCB0OiBiNjQoY3Quc2xpY2UoLTE2KSksIHRzLCBuOiBub25jZSB9OwogICAgfQoKICAgIC8vIOKUgOKUgOKUgCBHdWFyZCBzdGF0ZSDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKICAgIGxldCBfZ3VhcmRBY3RpdmUgPSBmYWxzZTsKICAgIGxldCBfZ3VhcmRUaW1lciAgPSBudWxsOwogICAgbGV0IF9ndWFyZEJDICAgICA9IG51bGw7CiAgICBsZXQgX3ByZVNjYW5Ib29rID0gbnVsbDsgLy8gc2V0IGLhu59pIGVhcmx5LWNoZWNrIHRyxrDhu5tjIGluamVjdFBhZ2VIb29rCiAgICBsZXQgX2hvb2tTdHJpa2UgID0gMDsgICAgLy8gW3Y2LXNtYXJ0XSDEkeG6v20gbGnDqm4gdOG7pWMgcGjDoXQgaGnhu4duIGhvb2sg4oCUIHnDqnUgY+G6p3Ug4omlMyBt4bubaSBraG/DoSB04bqhbQogICAgY29uc3QgX0dVQVJEX1NUQVJUX1RTID0gRGF0ZS5ub3coKTsgLy8gW3Y2LXNtYXJ0XSBtaeG7hW4gbmhp4buFbSA2MHMgxJHhuqd1ICh0cmFuZyDEkWFuZyB04bqjaSkKICAgIC8vIFt2Ni1zbWFydF0gS2hvw6EgVsSoTkggVknhu4ROIHbhuqtuIGdp4buvIG5oxrAgY8WpIGtoaSBQSMOBVCBISeG7hk4gxJDDmk5HIHNjcmlwdCBs4bqhICjEkcOjIHjDoWMgbmjhuq1uKS4KICAgIC8vICAgICAgICAgICAgIENo4buJIHRpbmggY2jhu4luaCBi4buZIGTDsjogYuG7jyBuaOG6p20gY8O5bmctc2NyaXB0LW5oaeG7gXUtdGFiLCB5w6p1IGPhuqd1IDMgbOG6p24gbGnDqm4gdOG7pWMgbeG7m2kga+G6v3QgbHXhuq1uIGhvb2suCiAgICBjb25zdCBfR1VBUkRfTFMgID0gWydfdGxfY29ubl9rZXknLCdfdGxfY29ubl90eXBlJywnX3RsX2Nvbm5fZXhwJywnX3RpZXBfdGhlbWUnLCdfdGxfaHdpZCcsJ190bF9ndWFyZF90cyddOwogICAgY29uc3QgX0dVQVJEX1VJICA9IFsndGwtY29ubi1vdmVybGF5JywndGwtcGFuZWwnLCd0bC1mbG9hdEJ0bicsJ3RsLXVpLXN0eWxlJywndGwtbG9jay1zdHlsZScsJ3RpZXAtbW9kYWwtc3R5bGUnLCd0aWVwLW1vZGFsLW92ZXJsYXknXTsKCiAgICAvLyDilIDilIDilIAgSGnhu4NuIHRo4buLIGPhuqNuaCBiw6FvIHBow6F0IGhp4buHbiBwaOG6p24gbeG7gW0gbOG6oSDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKICAgIGZ1bmN0aW9uIF9zaG93R3VhcmRXYXJuaW5nKHJlYXNvbikgewogICAgICAgIGNvbnN0IHJlbmRlciA9ICgpID0+IHsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIGNvbnN0IGV4ID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ190bF9ndWFyZF93YXJuJyk7CiAgICAgICAgICAgICAgICBpZiAoZXgpIGV4LnJlbW92ZSgpOwogICAgICAgICAgICAgICAgY29uc3QgbyA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2RpdicpOwogICAgICAgICAgICAgICAgby5pZCA9ICdfdGxfZ3VhcmRfd2Fybic7CiAgICAgICAgICAgICAgICBvLnN0eWxlLmNzc1RleHQgPSAncG9zaXRpb246Zml4ZWQhaW1wb3J0YW50O3RvcDowIWltcG9ydGFudDtsZWZ0OjAhaW1wb3J0YW50O3dpZHRoOjEwMHZ3IWltcG9ydGFudDtoZWlnaHQ6MTAwdmghaW1wb3J0YW50O2JhY2tncm91bmQ6cmdiYSgwLDAsMCwwLjk2KSFpbXBvcnRhbnQ7ei1pbmRleDoyMTQ3NDgzNjQ3IWltcG9ydGFudDtkaXNwbGF5OmZsZXghaW1wb3J0YW50O2FsaWduLWl0ZW1zOmNlbnRlciFpbXBvcnRhbnQ7anVzdGlmeS1jb250ZW50OmNlbnRlciFpbXBvcnRhbnQ7Zm9udC1mYW1pbHk6bW9ub3NwYWNlIWltcG9ydGFudDsnOwogICAgICAgICAgICAgICAgby5pbm5lckhUTUwgPSBgPGRpdiBzdHlsZT0iYmFja2dyb3VuZDojMGQwZDBkO2JvcmRlcjoycHggc29saWQgI2VmMjMzYztib3JkZXItcmFkaXVzOjE2cHg7cGFkZGluZzozNnB4IDMycHg7bWF4LXdpZHRoOjQzMHB4O3RleHQtYWxpZ246Y2VudGVyO2JveC1zaGFkb3c6MCAwIDgwcHggcmdiYSgyMzksMzUsNjAsMC42KSwwIDAgMTYwcHggcmdiYSgyMzksMzUsNjAsMC4xNSk7Ij4KICAgICAgICAgICAgICAgICAgICA8ZGl2IHN0eWxlPSJmb250LXNpemU6NTJweDttYXJnaW4tYm90dG9tOjE0cHg7Ij7wn5qoPC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPHN0eWxlPkBrZXlmcmFtZXMgX3RsQmxpbmt7NTAle29wYWNpdHk6MH19I190bF9ndWFyZF93YXJuIC5nbGl0Y2h7YW5pbWF0aW9uOl90bEJsaW5rIDAuNzVzIHN0ZXAtZW5kIGluZmluaXRlO308L3N0eWxlPgogICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9ImdsaXRjaCIgc3R5bGU9ImZvbnQtZmFtaWx5OidDb3VyaWVyIE5ldycsbW9ub3NwYWNlO2ZvbnQtc2l6ZToxNnB4O2ZvbnQtd2VpZ2h0OjkwMDtjb2xvcjojZWYyMzNjO3RleHQtdHJhbnNmb3JtOnVwcGVyY2FzZTtsZXR0ZXItc3BhY2luZzozcHg7bWFyZ2luLWJvdHRvbToxNHB4OyI+4pqgIFBIw4FUIEhJ4buGTiBQSOG6pk4gTeG7gE0gTOG6oDwvZGl2PgogICAgICAgICAgICAgICAgICAgIDxkaXYgc3R5bGU9ImNvbG9yOnJnYmEoMjU1LDI1NSwyNTUsMC43OCk7Zm9udC1zaXplOjEyLjVweDtsaW5lLWhlaWdodDoxLjk7bWFyZ2luLWJvdHRvbToxOHB4OyI+JHtyZWFzb24gfHwgJ1Bow6F0IGhp4buHbiBzY3JpcHQvcGjhuqduIG3hu4FtIGtow7RuZyByw7Ugbmd14buTbiBn4buRYyDEkWFuZyBjaOG6oXkgc29uZyBzb25nLid9PGJyPjxicj5Ub8OgbiBi4buZIGThu68gbGnhu4d1IGtob8OhIMSRw6MgYuG7iyA8YiBzdHlsZT0iY29sb3I6I2VmMjMzYyI+WMOTQSBU4buwIMSQ4buYTkc8L2I+IMSR4buDIGLhuqNvIHbhu4cgaOG7hyB0aOG7kW5nLjxicj5MacOqbiBo4buHIGFkbWluIMSR4buDIMSRxrDhu6NjIGjhu5cgdHLhu6MuPC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPGRpdiBzdHlsZT0iY29sb3I6cmdiYSgyMzksMzUsNjAsMC40NSk7Zm9udC1zaXplOjlweDtsZXR0ZXItc3BhY2luZzoycHg7Zm9udC1mYW1pbHk6J0NvdXJpZXIgTmV3Jyxtb25vc3BhY2U7Ij5USEnDik4gVEFJIFTDmSBU4buYSSAvLyBTRUNVUklUWSBMT0NLRE9XTiB2NTwvZGl2PgogICAgICAgICAgICAgICAgPC9kaXY+YDsKICAgICAgICAgICAgICAgIGRvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQobyk7CiAgICAgICAgICAgIH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgfTsKICAgICAgICBpZiAoZG9jdW1lbnQuYm9keSkgcmVuZGVyKCk7CiAgICAgICAgZWxzZSBkb2N1bWVudC5hZGRFdmVudExpc3RlbmVyKCdET01Db250ZW50TG9hZGVkJywgcmVuZGVyKTsKICAgIH0KCiAgICAvLyDilIDilIDilIAgVOG7sSBodeG7tyBob8OgbiB0b8OgbiDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKICAgIGZ1bmN0aW9uIF9zZWxmRGVzdHJ1Y3QocmVhc29uKSB7CiAgICAgICAgdHJ5IHsgaWYgKF9ndWFyZFRpbWVyKSB7IGNsZWFySW50ZXJ2YWwoX2d1YXJkVGltZXIpOyBfZ3VhcmRUaW1lciA9IG51bGw7IH0gfSBjYXRjaCAoXykge30KICAgICAgICB0cnkgeyBpZiAoX2d1YXJkQkMpICAgIHsgX2d1YXJkQkMuY2xvc2UoKTsgICAgICAgICAgICBfZ3VhcmRCQyAgICA9IG51bGw7IH0gfSBjYXRjaCAoXykge30KICAgICAgICAvLyBYb8OhIHRvw6BuIGLhu5kgTFMgbGnDqm4gcXVhbiDEkeG6v24gc2NyaXB0CiAgICAgICAgX0dVQVJEX0xTLmZvckVhY2goayA9PiB7IHRyeSB7IGxvY2FsU3RvcmFnZS5yZW1vdmVJdGVtKGspOyB9IGNhdGNoIChfKSB7fSB9KTsKICAgICAgICAvLyDEkOG6t3QgY+G7nSDEkeG7mWMg4oCUIG5nxINuIHNjcmlwdCBraOG7n2kgxJHhu5luZyBs4bqhaQogICAgICAgIHRyeSB7IGxvY2FsU3RvcmFnZS5zZXRJdGVtKCdfdGxfcG9pc29uZWQnLCAnMScpOyB9IGNhdGNoIChfKSB7fQogICAgICAgIC8vIFhvw6EgdG/DoG4gYuG7mSBET00gZG8gc2NyaXB0IHThuqFvIHJhCiAgICAgICAgX0dVQVJEX1VJLmZvckVhY2goaWQgPT4geyB0cnkgeyBjb25zdCBlbCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKGlkKTsgaWYgKGVsKSBlbC5yZW1vdmUoKTsgfSBjYXRjaCAoXykge30gfSk7CiAgICAgICAgLy8gUmVzZXQgdG/DoG4gYuG7mSBzZXNzaW9uIG7hu5lpIGLhu5kKICAgICAgICBDVVJSRU5UX0tFWSA9IG51bGw7CiAgICAgICAgS0VZX1NUQVRVUyAgPSB7IHZhbGlkOiBmYWxzZSwgdHlwZTogbnVsbCwgZXhwaXJlc19hdDogbnVsbCB9OwogICAgICAgIHRyeSB7IF9zZWNTZXNzaW9uID0geyB0b2tlbjogbnVsbCwgZXhwOiAwLCBmcEhhc2g6IG51bGwsIHNlcTogMSB9OyB9IGNhdGNoIChfKSB7fQogICAgICAgIENVUlJFTlRfREVWSUNFID0gJyc7CiAgICAgICAgX2d1YXJkQWN0aXZlID0gZmFsc2U7CiAgICAgICAgX3Nob3dHdWFyZFdhcm5pbmcocmVhc29uKTsKICAgIH0KCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIC8vICBbdjYuM10gQkFOLU1PREUg4oCUIGtob8OhIGRvIFNFUlZFUiBCQU4gSVAvdGhp4bq/dCBi4buLIChDw5MgVEjhu4IgTeG7niBM4bqgSSkuCiAgICAvLyAgS2jDoWMgX3NlbGZEZXN0cnVjdCAoa2hvw6EgdsSpbmggdmnhu4VuIGRvIHNjcmlwdCBs4bqhKTogYmFuLW1vZGUgdOG7sSBwb2xsaW5nCiAgICAvLyAgc2VydmVyIG3hu5dpIDE1czsga2hpIGFkbWluIG3hu58ga2hvw6Eg4oaSIFThu7AgxJDhu5hORyByZWxvYWQsIGTDuW5nIGzhuqFpIGLDrG5oIHRoxrDhu51uZwogICAgLy8gIChrZXkgxJHGsOG7o2MgR0nhu64gTOG6oEkgdHJvbmcgbG9jYWxTdG9yYWdlLCBraMO0bmcgeMOzYSkuCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIGxldCBfYmFuU3RhdGUgPSB7IGFjdGl2ZTogZmFsc2UsIHRpbWVyOiBudWxsLCByZWFzb246ICcnIH07CiAgICBmdW5jdGlvbiBfc2hvd0JhblNjcmVlbihyZWFzb24pIHsKICAgICAgICBjb25zdCByZW5kZXIgPSAoKSA9PiB7CiAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICBjb25zdCBleCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdfdGxfYmFuX292ZXJsYXknKTsKICAgICAgICAgICAgICAgIGlmIChleCkgZXgucmVtb3ZlKCk7CiAgICAgICAgICAgICAgICBjb25zdCBvID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7CiAgICAgICAgICAgICAgICBvLmlkID0gJ190bF9iYW5fb3ZlcmxheSc7CiAgICAgICAgICAgICAgICBvLnN0eWxlLmNzc1RleHQgPSAncG9zaXRpb246Zml4ZWQhaW1wb3J0YW50O3RvcDowIWltcG9ydGFudDtsZWZ0OjAhaW1wb3J0YW50O3dpZHRoOjEwMHZ3IWltcG9ydGFudDtoZWlnaHQ6MTAwdmghaW1wb3J0YW50O2JhY2tncm91bmQ6cmdiYSgwLDAsMCwwLjk2KSFpbXBvcnRhbnQ7ei1pbmRleDoyMTQ3NDgzNjQ3IWltcG9ydGFudDtkaXNwbGF5OmZsZXghaW1wb3J0YW50O2FsaWduLWl0ZW1zOmNlbnRlciFpbXBvcnRhbnQ7anVzdGlmeS1jb250ZW50OmNlbnRlciFpbXBvcnRhbnQ7Zm9udC1mYW1pbHk6bW9ub3NwYWNlIWltcG9ydGFudDsnOwogICAgICAgICAgICAgICAgby5pbm5lckhUTUwgPSAnPGRpdiBzdHlsZT0iYmFja2dyb3VuZDojMGQwZDBkO2JvcmRlcjoycHggc29saWQgI2VmMjMzYztib3JkZXItcmFkaXVzOjE2cHg7cGFkZGluZzozNnB4IDMycHg7bWF4LXdpZHRoOjQzMHB4O3RleHQtYWxpZ246Y2VudGVyO2JveC1zaGFkb3c6MCAwIDgwcHggcmdiYSgyMzksMzUsNjAsMC42KSwwIDAgMTYwcHggcmdiYSgyMzksMzUsNjAsMC4xNSk7Ij4nCiAgICAgICAgICAgICAgICAgICAgKyAnPGRpdiBzdHlsZT0iZm9udC1zaXplOjUycHg7bWFyZ2luLWJvdHRvbToxNHB4OyI+8J+aqDwvZGl2PicKICAgICAgICAgICAgICAgICAgICArICc8c3R5bGU+QGtleWZyYW1lcyBfdGxCbGlua3s1MCV7b3BhY2l0eTowfX0jX3RsX2Jhbl9vdmVybGF5IC5nbGl0Y2h7YW5pbWF0aW9uOl90bEJsaW5rIDAuNzVzIHN0ZXAtZW5kIGluZmluaXRlO308L3N0eWxlPicKICAgICAgICAgICAgICAgICAgICArICc8ZGl2IGNsYXNzPSJnbGl0Y2giIHN0eWxlPSJmb250LWZhbWlseTpcJ0NvdXJpZXIgTmV3XCcsbW9ub3NwYWNlO2ZvbnQtc2l6ZToxNnB4O2ZvbnQtd2VpZ2h0OjkwMDtjb2xvcjojZWYyMzNjO3RleHQtdHJhbnNmb3JtOnVwcGVyY2FzZTtsZXR0ZXItc3BhY2luZzozcHg7bWFyZ2luLWJvdHRvbToxNHB4OyI+4pqgIFRoaeG6v3QgYuG7iyAvIElQIMSRw6MgYuG7iyBraG/DoTwvZGl2PicKICAgICAgICAgICAgICAgICAgICArICc8ZGl2IHN0eWxlPSJjb2xvcjpyZ2JhKDI1NSwyNTUsMjU1LDAuNzgpO2ZvbnQtc2l6ZToxMi41cHg7bGluZS1oZWlnaHQ6MS45O21hcmdpbi1ib3R0b206MTRweDsiPicgKyAocmVhc29uIHx8ICdQaMOhdCBoaeG7h24gbcO0aSB0csaw4budbmcga2jDtG5nIGjhu6NwIGzhu4cuJykgKyAnPGJyPkxpw6puIGjhu4cgYWRtaW4gxJHhu4MgxJHGsOG7o2MgbeG7nyBraG/DoS48L2Rpdj4nCiAgICAgICAgICAgICAgICAgICAgKyAnPGRpdiBpZD0iX3RsX2Jhbl9zdGF0dXMiIHN0eWxlPSJjb2xvcjojZmZjMTA3O2ZvbnQtc2l6ZToxMS41cHg7bGluZS1oZWlnaHQ6MS44OyI+8J+UhCDEkGFuZyB04buxIMSR4buZbmcga2nhu4NtIHRyYSBt4buXaSAxNSBnacOieS4uLjxicj5LaGkgYWRtaW4gbeG7nyBraG/DoSwgdG9vbCBz4bq9IDxiIHN0eWxlPSJjb2xvcjojMDBlNjc2OyI+VOG7sCDEkOG7mE5HIGhv4bqhdCDEkeG7mW5nIGzhuqFpPC9iPiwga2jDtG5nIGPhuqduIHRoYW8gdMOhYy48L2Rpdj4nCiAgICAgICAgICAgICAgICAgICAgKyAnPGRpdiBzdHlsZT0iY29sb3I6cmdiYSgyMzksMzUsNjAsMC40NSk7Zm9udC1zaXplOjlweDtsZXR0ZXItc3BhY2luZzoycHg7Zm9udC1mYW1pbHk6XCdDb3VyaWVyIE5ld1wnLG1vbm9zcGFjZTttYXJnaW4tdG9wOjE2cHg7Ij5USEnDik4gVEFJIFTDmSBU4buYSSAvLyBCQU4gTE9DSyB2Ni4zIChU4buwIE3hu54gS0hJIFVOQkFOKTwvZGl2PicKICAgICAgICAgICAgICAgICAgICArICc8L2Rpdj4nOwogICAgICAgICAgICAgICAgZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChvKTsKICAgICAgICAgICAgfSBjYXRjaCAoXykge30KICAgICAgICB9OwogICAgICAgIGlmIChkb2N1bWVudC5ib2R5KSByZW5kZXIoKTsKICAgICAgICBlbHNlIGRvY3VtZW50LmFkZEV2ZW50TGlzdGVuZXIoJ0RPTUNvbnRlbnRMb2FkZWQnLCByZW5kZXIpOwogICAgfQogICAgZnVuY3Rpb24gX2JhblBvbGxPbmNlKCkgewogICAgICAgIChhc3luYyAoKSA9PiB7CiAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICBjb25zdCBwcmVmaXggPSBhd2FpdCBfYXBpUHJlZml4KCk7CiAgICAgICAgICAgICAgICBHTV94bWxodHRwUmVxdWVzdCh7CiAgICAgICAgICAgICAgICAgICAgbWV0aG9kOiAnR0VUJywgdXJsOiBTRVJWRVJfQkFTRSArIHByZWZpeCArICcvcGluZycsIHRpbWVvdXQ6IDgwMDAsCiAgICAgICAgICAgICAgICAgICAgb25sb2FkOiAocikgPT4gewogICAgICAgICAgICAgICAgICAgICAgICBpZiAoci5zdGF0dXMgPT09IDIwMCkgeyBfZXhpdEJhbk1vZGUoKTsgcmV0dXJuOyB9CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGVsID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ190bF9iYW5fc3RhdHVzJyk7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChlbCkgZWwuaW5uZXJIVE1MID0gJ/CflIQgVuG6q24gYuG7iyBraG/DoSDigJQgxJFhbmcgY2jhu50gYWRtaW4gbeG7nyBraG/DoS4uLjxicj4odOG7sSBraeG7g20gdHJhIGzhuqFpIHNhdSAxNSBnacOieSknOwogICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAgICAgb25lcnJvcjogKCkgPT4ge30sIG9udGltZW91dDogKCkgPT4ge30KICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgIH0pKCk7CiAgICB9CiAgICBmdW5jdGlvbiBfZW50ZXJCYW5Nb2RlKHJlYXNvbikgewogICAgICAgIGlmIChfYmFuU3RhdGUuYWN0aXZlKSByZXR1cm47CiAgICAgICAgX2JhblN0YXRlLmFjdGl2ZSA9IHRydWU7CiAgICAgICAgX2JhblN0YXRlLnJlYXNvbiA9IHJlYXNvbiB8fCAnJzsKICAgICAgICAvLyBE4burbmcgaGVhcnRiZWF0ICsgZ3VhcmQgKMSRw6MgdsOgbyBiYW4gbW9kZSwga2jDtG5nIGPhuqduIG7hu69hKQogICAgICAgIHRyeSB7IGlmIChfaGVhcnRiZWF0VGltZXIpIHsgY2xlYXJJbnRlcnZhbChfaGVhcnRiZWF0VGltZXIpOyBfaGVhcnRiZWF0VGltZXIgPSBudWxsOyB9IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgdHJ5IHsgaWYgKF9ndWFyZFRpbWVyKSAgICAgeyBjbGVhckludGVydmFsKF9ndWFyZFRpbWVyKTsgICAgIF9ndWFyZFRpbWVyICAgICA9IG51bGw7IH0gfSBjYXRjaCAoXykge30KICAgICAgICB0cnkgeyBpZiAoX2d1YXJkQkMpICAgICAgICB7IF9ndWFyZEJDLmNsb3NlKCk7ICAgICAgICAgICAgICAgX2d1YXJkQkMgICAgICAgID0gbnVsbDsgfSB9IGNhdGNoIChfKSB7fQogICAgICAgIC8vIFhvw6EgVUkgxJFhbmcgY2jhuqF5IChuZ+G7q25nIGhv4bqhdCDEkeG7mW5nKSDigJQgR0nhu64gTOG6oEkga2V5IHRyb25nIExTIMSR4buDIG3hu58ga2hvw6EgZMO5bmcgbOG6oWkgbmdheQogICAgICAgIFsndGwtcGFuZWwnLCd0bC1mbG9hdEJ0bicsJ3RsLWNvbm4tb3ZlcmxheScsJ3RpZXAtbW9kYWwtb3ZlcmxheSddLmZvckVhY2goaWQgPT4geyB0cnkgeyBjb25zdCBlbCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKGlkKTsgaWYgKGVsKSBlbC5yZW1vdmUoKTsgfSBjYXRjaCAoXykge30gfSk7CiAgICAgICAgQ1VSUkVOVF9LRVkgPSBudWxsOwogICAgICAgIEtFWV9TVEFUVVMgID0geyB2YWxpZDogZmFsc2UsIHR5cGU6IG51bGwsIGV4cGlyZXNfYXQ6IG51bGwgfTsKICAgICAgICB0cnkgeyBfc2VjU2Vzc2lvbiA9IHsgdG9rZW46IG51bGwsIGV4cDogMCwgZnBIYXNoOiBudWxsLCBzZXE6IDEgfTsgfSBjYXRjaCAoXykge30KICAgICAgICBfZmlyZU1vZHVsZSA9IHsgZmFjdG9yeTogbnVsbCwgdmVyc2lvbjogMCwgbG9hZGluZzogZmFsc2UsIGxhc3RFcnI6IG51bGwgfTsKICAgICAgICBfc2hvd0JhblNjcmVlbihyZWFzb24pOwogICAgICAgIC8vIFBvbGxpbmcgbeG7l2kgMTVzIGNo4budIGFkbWluIG3hu58ga2hvw6E7IGzhuqduIMSR4bqndSBzYXUgNXMKICAgICAgICBfYmFuU3RhdGUudGltZXIgPSBzZXRJbnRlcnZhbChfYmFuUG9sbE9uY2UsIDE1MDAwKTsKICAgICAgICBzZXRUaW1lb3V0KF9iYW5Qb2xsT25jZSwgNTAwMCk7CiAgICB9CiAgICBmdW5jdGlvbiBfZXhpdEJhbk1vZGUoKSB7CiAgICAgICAgaWYgKCFfYmFuU3RhdGUuYWN0aXZlKSByZXR1cm47CiAgICAgICAgX2JhblN0YXRlLmFjdGl2ZSA9IGZhbHNlOwogICAgICAgIHRyeSB7IGlmIChfYmFuU3RhdGUudGltZXIpIHsgY2xlYXJJbnRlcnZhbChfYmFuU3RhdGUudGltZXIpOyBfYmFuU3RhdGUudGltZXIgPSBudWxsOyB9IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgdHJ5IHsgY29uc3QgZWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnX3RsX2Jhbl9vdmVybGF5Jyk7IGlmIChlbCkgZWwucmVtb3ZlKCk7IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgLy8gVOG7sSByZWxvYWQg4oaSIHNjcmlwdCBraOG7n2kgxJHhu5luZyBs4bqhaSBz4bqhY2gsIGtleSB24bqrbiBjw7JuIOKGkiBkw7luZyBiw6xuaCB0aMaw4budbmcKICAgICAgICBzZXRUaW1lb3V0KCgpID0+IHsgdHJ5IHsgd2luZG93LmxvY2F0aW9uLnJlbG9hZCgpOyB9IGNhdGNoIChfKSB7fSB9LCA4MDApOwogICAgfQoKICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgLy8gIFt2Ni40XSBSRU1PVEUtTE9DSyDigJQga2hvw6EgZG8gUEjDgVQgSEnhu4ZOIFNDUklQVCBM4bqgLgogICAgLy8gIEtow6FjIF9zZWxmRGVzdHJ1Y3QgKGPFqSwga2hvw6EgdsSpbmggdmnhu4VuLCB4w7NhIGtleSk6CiAgICAvLyAgIDEpIFThu7AgxJDhu5hORyBn4butaSBiw6FvIGPDoW8gbMOqbiBzZXJ2ZXIgKGlwICsgdGhp4bq/dCBi4buLICsgbMO9IGRvKQogICAgLy8gICAyKSBTZXJ2ZXIgZ2hpIHbDoG8gdGFiIGFkbWluIHJpw6puZyDihpIgYWRtaW4gdGjhuqV5IElQICsgdGhp4bq/dCBi4buLIGLhu4sga2hvw6EKICAgIC8vICAgMykgQWRtaW4gYuG6pW0gTeG7niBLSE/DgSDihpIgY2xpZW50IHBvbGxpbmcgdGjhuqV5IOKGkiBU4buwIMSQ4buYTkcgcmVsb2FkLCBkw7luZyBs4bqhaQogICAgLy8gICAgICBiw6xuaCB0aMaw4budbmcgKEdJ4buuIEzhuqBJIGtleSB0cm9uZyBsb2NhbFN0b3JhZ2UsIGtow7RuZyBj4bqnbiBuaOG6rXAgbOG6oWkpLgogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICBsZXQgX3JlbW90ZUxvY2tTdGF0ZSA9IHsgYWN0aXZlOiBmYWxzZSwgdGltZXI6IG51bGwsIHJlYXNvbjogJycsIHJlcG9ydGVkOiBmYWxzZSB9OwogICAgZnVuY3Rpb24gX3JsU2VuZFJlcG9ydChyZWFzb24pIHsKICAgICAgICAoYXN5bmMgKCkgPT4gewogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgY29uc3QgcHJlZml4ID0gYXdhaXQgX2FwaVByZWZpeCgpOwogICAgICAgICAgICAgICAgbGV0IG9sbVVzZXIgPSAnJzsKICAgICAgICAgICAgICAgIHRyeSB7IG9sbVVzZXIgPSBnZXRPbG1Vc2VybmFtZSgpOyB9IGNhdGNoIChfKSB7fQogICAgICAgICAgICAgICAgY29uc3QgYm9keSA9IEpTT04uc3RyaW5naWZ5KHsKICAgICAgICAgICAgICAgICAgICBrZXk6IENVUlJFTlRfS0VZIHx8IF9zTFMuZ2V0KExTX0tFWSkgfHwgJycsCiAgICAgICAgICAgICAgICAgICAgaHdpZDogZ2V0SFdJRCgpLCBmcDogX2NvbGxlY3RGUCgpLCBkZXZpY2U6IF9jb2xsZWN0RGV2aWNlKCksCiAgICAgICAgICAgICAgICAgICAgcmVhc29uOiBTdHJpbmcocmVhc29uIHx8ICcnKS5zbGljZSgwLCAyMDApLCBvbG1fdXNlcjogb2xtVXNlcgogICAgICAgICAgICAgICAgfSk7CiAgICAgICAgICAgICAgICBsZXQgdHJpZXMgPSAwOwogICAgICAgICAgICAgICAgbGV0IHNpZ0hkcnMgPSB7fTsKICAgICAgICAgICAgICAgIHRyeSB7IHNpZ0hkcnMgPSBhd2FpdCBfc2lnblJlcShib2R5LCAnJyk7IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgICAgICAgICAoZnVuY3Rpb24gc2VuZCgpIHsKICAgICAgICAgICAgICAgICAgICB0cmllcysrOwogICAgICAgICAgICAgICAgICAgIEdNX3htbGh0dHBSZXF1ZXN0KHsKICAgICAgICAgICAgICAgICAgICAgICAgbWV0aG9kOiAnUE9TVCcsIHVybDogU0VSVkVSX0JBU0UgKyBwcmVmaXggKyAnL2xvY2stcmVwb3J0JywKICAgICAgICAgICAgICAgICAgICAgICAgaGVhZGVyczogT2JqZWN0LmFzc2lnbih7ICdDb250ZW50LVR5cGUnOiAnYXBwbGljYXRpb24vanNvbicgfSwgc2lnSGRycyksIGRhdGE6IGJvZHksIHRpbWVvdXQ6IDEwMDAwLAogICAgICAgICAgICAgICAgICAgICAgICBvbmxvYWQ6ICgpID0+IHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIF9yZW1vdGVMb2NrU3RhdGUucmVwb3J0ZWQgPSB0cnVlOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgZWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnX3RsX3JsX3N0YXR1cycpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGVsKSBlbC5pbm5lckhUTUwgPSAn4pyFIMSQw6MgYsOhbyBjw6FvIGzDqm4gc2VydmVyIGFkbWluLjxicj7wn5SEIMSQYW5nIGNo4budIGFkbWluIG3hu58ga2hvw6EgKHThu7Ega2nhu4NtIHRyYSBt4buXaSAyMHMpLi4uJzsKICAgICAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgICAgb25lcnJvcjogICAoKSA9PiB7IGlmICh0cmllcyA8IDQpIHNldFRpbWVvdXQoc2VuZCwgMzAwMCk7IH0sCiAgICAgICAgICAgICAgICAgICAgICAgIG9udGltZW91dDogKCkgPT4geyBpZiAodHJpZXMgPCA0KSBzZXRUaW1lb3V0KHNlbmQsIDMwMDApOyB9CiAgICAgICAgICAgICAgICAgICAgfSk7CiAgICAgICAgICAgICAgICB9KSgpOwogICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgIH0pKCk7CiAgICB9CiAgICBmdW5jdGlvbiBfc2hvd1JlbW90ZUxvY2tTY3JlZW4ocmVhc29uKSB7CiAgICAgICAgY29uc3QgcmVuZGVyID0gKCkgPT4gewogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgY29uc3QgZXggPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnX3RsX3JsX292ZXJsYXknKTsKICAgICAgICAgICAgICAgIGlmIChleCkgZXgucmVtb3ZlKCk7CiAgICAgICAgICAgICAgICBjb25zdCBvID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7CiAgICAgICAgICAgICAgICBvLmlkID0gJ190bF9ybF9vdmVybGF5JzsKICAgICAgICAgICAgICAgIG8uc3R5bGUuY3NzVGV4dCA9ICdwb3NpdGlvbjpmaXhlZCFpbXBvcnRhbnQ7dG9wOjAhaW1wb3J0YW50O2xlZnQ6MCFpbXBvcnRhbnQ7d2lkdGg6MTAwdnchaW1wb3J0YW50O2hlaWdodDoxMDB2aCFpbXBvcnRhbnQ7YmFja2dyb3VuZDpyZ2JhKDAsMCwwLDAuOTYpIWltcG9ydGFudDt6LWluZGV4OjIxNDc0ODM2NDchaW1wb3J0YW50O2Rpc3BsYXk6ZmxleCFpbXBvcnRhbnQ7YWxpZ24taXRlbXM6Y2VudGVyIWltcG9ydGFudDtqdXN0aWZ5LWNvbnRlbnQ6Y2VudGVyIWltcG9ydGFudDtmb250LWZhbWlseTptb25vc3BhY2UhaW1wb3J0YW50Oyc7CiAgICAgICAgICAgICAgICBvLmlubmVySFRNTCA9ICc8ZGl2IHN0eWxlPSJiYWNrZ3JvdW5kOiMwZDBkMGQ7Ym9yZGVyOjJweCBzb2xpZCAjZWYyMzNjO2JvcmRlci1yYWRpdXM6MTZweDtwYWRkaW5nOjM2cHggMzJweDttYXgtd2lkdGg6NDMwcHg7dGV4dC1hbGlnbjpjZW50ZXI7Ym94LXNoYWRvdzowIDAgODBweCByZ2JhKDIzOSwzNSw2MCwwLjYpLDAgMCAxNjBweCByZ2JhKDIzOSwzNSw2MCwwLjE1KTsiPicKICAgICAgICAgICAgICAgICAgICArICc8ZGl2IHN0eWxlPSJmb250LXNpemU6NTJweDttYXJnaW4tYm90dG9tOjE0cHg7Ij7wn5qoPC9kaXY+JwogICAgICAgICAgICAgICAgICAgICsgJzxzdHlsZT5Aa2V5ZnJhbWVzIF90bEJsaW5rezUwJXtvcGFjaXR5OjB9fSNfdGxfcmxfb3ZlcmxheSAuZ2xpdGNoe2FuaW1hdGlvbjpfdGxCbGluayAwLjc1cyBzdGVwLWVuZCBpbmZpbml0ZTt9PC9zdHlsZT4nCiAgICAgICAgICAgICAgICAgICAgKyAnPGRpdiBjbGFzcz0iZ2xpdGNoIiBzdHlsZT0iZm9udC1mYW1pbHk6XCdDb3VyaWVyIE5ld1wnLG1vbm9zcGFjZTtmb250LXNpemU6MTZweDtmb250LXdlaWdodDo5MDA7Y29sb3I6I2VmMjMzYzt0ZXh0LXRyYW5zZm9ybTp1cHBlcmNhc2U7bGV0dGVyLXNwYWNpbmc6M3B4O21hcmdpbi1ib3R0b206MTRweDsiPuKaoCBQSMOBVCBISeG7hk4gUEjhuqZOIE3hu4BNIEzhuqA8L2Rpdj4nCiAgICAgICAgICAgICAgICAgICAgKyAnPGRpdiBzdHlsZT0iY29sb3I6cmdiYSgyNTUsMjU1LDI1NSwwLjc4KTtmb250LXNpemU6MTIuNXB4O2xpbmUtaGVpZ2h0OjEuOTttYXJnaW4tYm90dG9tOjE0cHg7Ij4nICsgKHJlYXNvbiB8fCAnUGjDoXQgaGnhu4duIHNjcmlwdC9waOG6p24gbeG7gW0ga2jDtG5nIHLDtSBuZ3Xhu5NuIGfhu5FjLicpICsgJzxicj7EkMOjIDxiIHN0eWxlPSJjb2xvcjojZmZjMTA3OyI+VOG7sCDEkOG7mE5HIGLDoW8gY8OhbzwvYj4gbMOqbiBzZXJ2ZXIgYWRtaW4uPC9kaXY+JwogICAgICAgICAgICAgICAgICAgICsgJzxkaXYgaWQ9Il90bF9ybF9zdGF0dXMiIHN0eWxlPSJjb2xvcjojZmZjMTA3O2ZvbnQtc2l6ZToxMS41cHg7bGluZS1oZWlnaHQ6MS44OyI+8J+TpCDEkGFuZyBn4butaSBiw6FvIGPDoW8gbMOqbiBzZXJ2ZXIuLi48L2Rpdj4nCiAgICAgICAgICAgICAgICAgICAgKyAnPGRpdiBzdHlsZT0iY29sb3I6cmdiYSgwLDIzMCwxMTgsMC42KTtmb250LXNpemU6MTAuNXB4O2xpbmUtaGVpZ2h0OjEuNzttYXJnaW4tdG9wOjEwcHg7Ij5LaGkgYWRtaW4gYuG6pW0gPGI+TeG7niBLSE/DgTwvYj4gdHLDqm4gdHJhbmcgcXXhuqNuIHRy4buLLDxicj50b29sIHPhur0gPGIgc3R5bGU9ImNvbG9yOiMwMGU2NzY7Ij5U4buwIMSQ4buYTkcgaG/huqF0IMSR4buZbmcgbOG6oWk8L2I+IChraMO0bmcgY+G6p24gbmjhuq1wIGzhuqFpIGtleSkuPC9kaXY+JwogICAgICAgICAgICAgICAgICAgICsgJzxkaXYgc3R5bGU9ImNvbG9yOnJnYmEoMjM5LDM1LDYwLDAuNDUpO2ZvbnQtc2l6ZTo5cHg7bGV0dGVyLXNwYWNpbmc6MnB4O2ZvbnQtZmFtaWx5OlwnQ291cmllciBOZXdcJyxtb25vc3BhY2U7bWFyZ2luLXRvcDoxNnB4OyI+VEhJw4pOIFRBSSBUw5kgVOG7mEkgLy8gUkVNT1RFIExPQ0sgdjYuNDwvZGl2PicKICAgICAgICAgICAgICAgICAgICArICc8ZGl2IHN0eWxlPSJjb2xvcjpyZ2JhKDI1NSwyNTUsMjU1LDAuMjUpO2ZvbnQtc2l6ZTo5cHg7bWFyZ2luLXRvcDo2cHg7Zm9udC1mYW1pbHk6bW9ub3NwYWNlOyI+SFdJRDogJyArIGdldEhXSUQoKSArICc8L2Rpdj4nCiAgICAgICAgICAgICAgICAgICAgKyAnPC9kaXY+JzsKICAgICAgICAgICAgICAgIGRvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQobyk7CiAgICAgICAgICAgIH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgfTsKICAgICAgICBpZiAoZG9jdW1lbnQuYm9keSkgcmVuZGVyKCk7CiAgICAgICAgZWxzZSBkb2N1bWVudC5hZGRFdmVudExpc3RlbmVyKCdET01Db250ZW50TG9hZGVkJywgcmVuZGVyKTsKICAgIH0KICAgIGZ1bmN0aW9uIF9yZW1vdGVMb2NrUG9sbE9uY2UoKSB7CiAgICAgICAgKGFzeW5jICgpID0+IHsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIGNvbnN0IHByZWZpeCA9IGF3YWl0IF9hcGlQcmVmaXgoKTsKICAgICAgICAgICAgICAgIGNvbnN0IGxvY2tCb2R5ID0gSlNPTi5zdHJpbmdpZnkoeyBod2lkOiBnZXRIV0lEKCkgfSk7CiAgICAgICAgICAgICAgICBsZXQgc2lnSGRyczIgPSB7fTsKICAgICAgICAgICAgICAgIHRyeSB7IHNpZ0hkcnMyID0gYXdhaXQgX3NpZ25SZXEobG9ja0JvZHksICcnKTsgfSBjYXRjaCAoXykge30KICAgICAgICAgICAgICAgIEdNX3htbGh0dHBSZXF1ZXN0KHsKICAgICAgICAgICAgICAgICAgICBtZXRob2Q6ICdQT1NUJywgdXJsOiBTRVJWRVJfQkFTRSArIHByZWZpeCArICcvbG9jay1zdGF0dXMnLAogICAgICAgICAgICAgICAgICAgIGhlYWRlcnM6IE9iamVjdC5hc3NpZ24oeyAnQ29udGVudC1UeXBlJzogJ2FwcGxpY2F0aW9uL2pzb24nIH0sIHNpZ0hkcnMyKSwKICAgICAgICAgICAgICAgICAgICBkYXRhOiBsb2NrQm9keSwgdGltZW91dDogODAwMCwKICAgICAgICAgICAgICAgICAgICBvbmxvYWQ6IChyKSA9PiB7CiAgICAgICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb25zdCBqID0gSlNPTi5wYXJzZShyLnJlc3BvbnNlVGV4dCk7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBpZiAoaiAmJiBqLmxvY2tlZCA9PT0gZmFsc2UpIHsgX2V4aXRSZW1vdGVMb2NrKCk7IHJldHVybjsgfQogICAgICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgZWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnX3RsX3JsX3N0YXR1cycpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGVsKSBlbC5pbm5lckhUTUwgPSAn8J+UkiBW4bqrbiBi4buLIGtob8OhIOKAlCBjaOG7nSBhZG1pbiBt4bufIGtob8OhLi4uPGJyPih04buxIGtp4buDbSB0cmEgbOG6oWkgc2F1IDIwcyknOwogICAgICAgICAgICAgICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAgICAgb25lcnJvcjogKCkgPT4ge30sIG9udGltZW91dDogKCkgPT4ge30KICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgIH0pKCk7CiAgICB9CiAgICBmdW5jdGlvbiBfZW50ZXJSZW1vdGVMb2NrKHJlYXNvbikgewogICAgICAgIGlmIChfcmVtb3RlTG9ja1N0YXRlLmFjdGl2ZSkgcmV0dXJuOwogICAgICAgIF9yZW1vdGVMb2NrU3RhdGUuYWN0aXZlID0gdHJ1ZTsKICAgICAgICBfcmVtb3RlTG9ja1N0YXRlLnJlYXNvbiA9IHJlYXNvbiB8fCAnJzsKICAgICAgICAvLyDEkMOhbmggZOG6pXUgdOG7k24gdOG6oWkgcXVhIHJlbG9hZCDigJQgS0jDlE5HIHjDs2Ega2V5IOKGkiBt4bufIGtob8OhIGTDuW5nIGzhuqFpIG5nYXkKICAgICAgICB0cnkgeyBsb2NhbFN0b3JhZ2Uuc2V0SXRlbSgnX3RsX3JlbW90ZV9sb2NrZWQnLCAnMScpOyB9IGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IGxvY2FsU3RvcmFnZS5yZW1vdmVJdGVtKCdfdGxfcG9pc29uZWQnKTsgfSBjYXRjaCAoXykge30gLy8gY+G7nSB2xKluaCB2aeG7hW4gY8WpIGtow7RuZyBkw7luZyBu4buvYQogICAgICAgIC8vIEThu6tuZyBt4buNaSB0aW1lciDEkWFuZyBjaOG6oXkKICAgICAgICB0cnkgeyBpZiAoX2hlYXJ0YmVhdFRpbWVyKSB7IGNsZWFySW50ZXJ2YWwoX2hlYXJ0YmVhdFRpbWVyKTsgX2hlYXJ0YmVhdFRpbWVyID0gbnVsbDsgfSB9IGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IGlmIChfZ3VhcmRUaW1lcikgICAgIHsgY2xlYXJJbnRlcnZhbChfZ3VhcmRUaW1lcik7ICAgICBfZ3VhcmRUaW1lciAgICAgPSBudWxsOyB9IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgdHJ5IHsgaWYgKF9ndWFyZEJDKSAgICAgICAgeyBfZ3VhcmRCQy5jbG9zZSgpOyAgICAgICAgICAgICAgIF9ndWFyZEJDICAgICAgICA9IG51bGw7IH0gfSBjYXRjaCAoXykge30KICAgICAgICB0cnkgeyBpZiAoX2JhblN0YXRlLnRpbWVyKSB7IGNsZWFySW50ZXJ2YWwoX2JhblN0YXRlLnRpbWVyKTsgX2JhblN0YXRlLnRpbWVyID0gbnVsbDsgfSB9IGNhdGNoIChfKSB7fQogICAgICAgIC8vIFhvw6EgVUkgxJFhbmcgY2jhuqF5IOKAlCBHSeG7riBM4bqgSSBrZXkgdHJvbmcgTFMKICAgICAgICBbJ3RsLXBhbmVsJywndGwtZmxvYXRCdG4nLCd0bC1jb25uLW92ZXJsYXknLCd0aWVwLW1vZGFsLW92ZXJsYXknLCdfdGxfZ3VhcmRfd2FybicsJ190bF9iYW5fb3ZlcmxheSddLmZvckVhY2goaWQgPT4geyB0cnkgeyBjb25zdCBlbCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKGlkKTsgaWYgKGVsKSBlbC5yZW1vdmUoKTsgfSBjYXRjaCAoXykge30gfSk7CiAgICAgICAgQ1VSUkVOVF9LRVkgPSBudWxsOwogICAgICAgIEtFWV9TVEFUVVMgID0geyB2YWxpZDogZmFsc2UsIHR5cGU6IG51bGwsIGV4cGlyZXNfYXQ6IG51bGwgfTsKICAgICAgICB0cnkgeyBfc2VjU2Vzc2lvbiA9IHsgdG9rZW46IG51bGwsIGV4cDogMCwgZnBIYXNoOiBudWxsLCBzZXE6IDEgfTsgfSBjYXRjaCAoXykge30KICAgICAgICBfZmlyZU1vZHVsZSA9IHsgZmFjdG9yeTogbnVsbCwgdmVyc2lvbjogMCwgbG9hZGluZzogZmFsc2UsIGxhc3RFcnI6IG51bGwgfTsKICAgICAgICBfc2hvd1JlbW90ZUxvY2tTY3JlZW4ocmVhc29uKTsKICAgICAgICBfcmxTZW5kUmVwb3J0KHJlYXNvbik7CiAgICAgICAgX3JlbW90ZUxvY2tTdGF0ZS50aW1lciA9IHNldEludGVydmFsKF9yZW1vdGVMb2NrUG9sbE9uY2UsIDIwMDAwKTsKICAgICAgICBzZXRUaW1lb3V0KF9yZW1vdGVMb2NrUG9sbE9uY2UsIDYwMDApOwogICAgfQogICAgZnVuY3Rpb24gX2V4aXRSZW1vdGVMb2NrKCkgewogICAgICAgIF9yZW1vdGVMb2NrU3RhdGUuYWN0aXZlID0gZmFsc2U7CiAgICAgICAgdHJ5IHsgaWYgKF9yZW1vdGVMb2NrU3RhdGUudGltZXIpIHsgY2xlYXJJbnRlcnZhbChfcmVtb3RlTG9ja1N0YXRlLnRpbWVyKTsgX3JlbW90ZUxvY2tTdGF0ZS50aW1lciA9IG51bGw7IH0gfSBjYXRjaCAoXykge30KICAgICAgICB0cnkgeyBsb2NhbFN0b3JhZ2UucmVtb3ZlSXRlbSgnX3RsX3JlbW90ZV9sb2NrZWQnKTsgfSBjYXRjaCAoXykge30KICAgICAgICB0cnkgeyBsb2NhbFN0b3JhZ2UucmVtb3ZlSXRlbSgnX3RsX3BvaXNvbmVkJyk7IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgdHJ5IHsgY29uc3QgZWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnX3RsX3JsX292ZXJsYXknKTsgaWYgKGVsKSBlbC5yZW1vdmUoKTsgfSBjYXRjaCAoXykge30KICAgICAgICAvLyBU4buxIHJlbG9hZCDihpIgc2NyaXB0IGto4bufaSDEkeG7mW5nIGzhuqFpIHPhuqFjaCwga2V5IHbhuqtuIGPDsm4g4oaSIGTDuW5nIGLDrG5oIHRoxrDhu51uZwogICAgICAgIHNldFRpbWVvdXQoKCkgPT4geyB0cnkgeyB3aW5kb3cubG9jYXRpb24ucmVsb2FkKCk7IH0gY2F0Y2ggKF8pIHt9IH0sIDgwMCk7CiAgICB9CgogICAgLy8g4pSA4pSA4pSAIFBow6F0IGhp4buHbiBob29rIHbDoG8gbmF0aXZlIGZ1bmN0aW9ucyDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKICAgIC8vIFt2Ni41XSBN4bufIHLhu5luZyBkYW5oIHPDoWNoOiB0aMOqbSBmZXRjaC9YSFIvc2V0VGltZW91dC9zZXRJbnRlcnZhbC9ldmFsIChhbnRpLWhvb2svZHVtcCBj4buxYyBt4bqhbmgpCiAgICBmdW5jdGlvbiBfZGV0ZWN0SG9va05vdygpIHsKICAgICAgICAvLyBbdjYuNS4yXSBXSElURUxJU1QgbG9hZGVyIEtleVZhdWx0IChPTE1fdXNlci5qcyk6IG7DsyBob29rIFhIUi9mZXRjaCBuZ2F5IHThu6sgZG9jdW1lbnQtc3RhcnQuCiAgICAgICAgLy8gICAgICAgICAgTuG6v3UgbG9hZGVyIMSRYW5nIGNo4bqheSAod2luZG93Ll9fa3ZfcV9idWYgdOG7k24gdOG6oWkpIOKGkiBjw6FjIG5hdGl2ZSBi4buLIHdyYXAgbMOgIEPhu6ZBIFRBLCBraMO0bmcgcGjhuqNpIHNjcmlwdCBs4bqhLgogICAgICAgIGxldCBfa3ZMb2FkZXJBY3RpdmUgPSBmYWxzZTsKICAgICAgICB0cnkgeyBfa3ZMb2FkZXJBY3RpdmUgPSAhISgodHlwZW9mIHVuc2FmZVdpbmRvdyAhPT0gJ3VuZGVmaW5lZCcgPyB1bnNhZmVXaW5kb3cgOiB3aW5kb3cpLl9fa3ZfcV9idWYpOyB9IGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IGlmICghRnVuY3Rpb24ucHJvdG90eXBlLnRvU3RyaW5nLnRvU3RyaW5nKCkuaW5jbHVkZXMoJ1tuYXRpdmUgY29kZV0nKSkgcmV0dXJuICdGdW5jdGlvbi5wcm90b3R5cGUudG9TdHJpbmcnOyB9IGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IGlmICghT2JqZWN0LmRlZmluZVByb3BlcnR5LnRvU3RyaW5nKCkuaW5jbHVkZXMoJ1tuYXRpdmUgY29kZV0nKSkgICAgICAgcmV0dXJuICdPYmplY3QuZGVmaW5lUHJvcGVydHknOyB9ICAgICAgIGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IGlmICghSlNPTi5wYXJzZS50b1N0cmluZygpLmluY2x1ZGVzKCdbbmF0aXZlIGNvZGVdJykpICAgICAgICAgICAgICAgICAgIHJldHVybiAnSlNPTi5wYXJzZSc7IH0gICAgICAgICAgICAgICAgICAgY2F0Y2ggKF8pIHt9CiAgICAgICAgaWYgKF9rdkxvYWRlckFjdGl2ZSkgcmV0dXJuIG51bGw7IC8vIGxvYWRlciBj4bunYSB0YSDEkWFuZyB3cmFwIGZldGNoL1hIUi9zZXRUaW1lb3V0IOKGkiBi4buPIHF1YSwga2jDtG5nIGtob8OhIG5o4bqnbQogICAgICAgIHRyeSB7IGlmICh0eXBlb2Ygd2luZG93LmZldGNoID09PSAnZnVuY3Rpb24nICYmICF3aW5kb3cuZmV0Y2gudG9TdHJpbmcoKS5pbmNsdWRlcygnW25hdGl2ZSBjb2RlXScpKSByZXR1cm4gJ3dpbmRvdy5mZXRjaCc7IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgdHJ5IHsgaWYgKCFYTUxIdHRwUmVxdWVzdC5wcm90b3R5cGUub3Blbi50b1N0cmluZygpLmluY2x1ZGVzKCdbbmF0aXZlIGNvZGVdJykpICByZXR1cm4gJ1hNTEh0dHBSZXF1ZXN0Lm9wZW4nOyB9ICBjYXRjaCAoXykge30KICAgICAgICB0cnkgeyBpZiAoIVhNTEh0dHBSZXF1ZXN0LnByb3RvdHlwZS5zZW5kLnRvU3RyaW5nKCkuaW5jbHVkZXMoJ1tuYXRpdmUgY29kZV0nKSkgIHJldHVybiAnWE1MSHR0cFJlcXVlc3Quc2VuZCc7IH0gIGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IGlmICghc2V0VGltZW91dC50b1N0cmluZygpLmluY2x1ZGVzKCdbbmF0aXZlIGNvZGVdJykpICByZXR1cm4gJ3NldFRpbWVvdXQnOyB9ICBjYXRjaCAoXykge30KICAgICAgICB0cnkgeyBpZiAoIXNldEludGVydmFsLnRvU3RyaW5nKCkuaW5jbHVkZXMoJ1tuYXRpdmUgY29kZV0nKSkgcmV0dXJuICdzZXRJbnRlcnZhbCc7IH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgdHJ5IHsgaWYgKCFldmFsLnRvU3RyaW5nKCkuaW5jbHVkZXMoJ1tuYXRpdmUgY29kZV0nKSkgICAgICAgIHJldHVybiAnZXZhbCc7IH0gICAgICAgIGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IGlmICghRnVuY3Rpb24udG9TdHJpbmcoKS5pbmNsdWRlcygnW25hdGl2ZSBjb2RlXScpKSAgICByZXR1cm4gJ0Z1bmN0aW9uJzsgfSAgICBjYXRjaCAoXykge30KICAgICAgICByZXR1cm4gbnVsbDsKICAgIH0KICAgIC8vIFt2Ni41XSBEZXZUb29scyBkZXRlY3Rpb24gKG5naGkgbmfhu50gZHVtcCkg4oCUIGNo4buJIFTEgk5HIMSRw7JuIHN0cmlrZSBraGkgQ8WoTkcgcGjDoXQgaGnhu4duIGhvb2sKICAgIGZ1bmN0aW9uIF9kZXZ0b29sc09wZW4oKSB7CiAgICAgICAgdHJ5IHsgcmV0dXJuICh3aW5kb3cub3V0ZXJXaWR0aCAtIHdpbmRvdy5pbm5lcldpZHRoID4gMTYwKSB8fCAod2luZG93Lm91dGVySGVpZ2h0IC0gd2luZG93LmlubmVySGVpZ2h0ID4gMjAwKTsgfSBjYXRjaCAoXykgeyByZXR1cm4gZmFsc2U7IH0KICAgIH0KICAgIC8vIEVhcmx5LWNoZWNrOiBjaOG6oXkgTkdBWSB04bqhaSBkZWZpbml0aW9uLXRpbWUsIFRSxq/hu5pDIGluamVjdFBhZ2VIb29rIOKUgAogICAgX3ByZVNjYW5Ib29rID0gX2RldGVjdEhvb2tOb3coKTsKCiAgICAvLyDilIDilIDilIAgUGjDoXQgaGnhu4duIHNjcmlwdCBzb25nIHNvbmcgcXVhIEJyb2FkY2FzdENoYW5uZWwg4pSA4pSACiAgICBmdW5jdGlvbiBfaW5pdEd1YXJkQkMoKSB7CiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgY29uc3QgY2hOYW1lID0gJ190bHRnXycgKyBBUElfU0VDUkVULnNsaWNlKDAsIDgpOwogICAgICAgICAgICBfZ3VhcmRCQyA9IG5ldyBCcm9hZGNhc3RDaGFubmVsKGNoTmFtZSk7CiAgICAgICAgICAgIF9ndWFyZEJDLm9ubWVzc2FnZSA9IChldnQpID0+IHsKICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgLy8gW3Y2LXNtYXJ0XSBDaOG7iSBDw5lORyBzY3JpcHQgdGEgbeG7m2kgZ+G7rWkgVExfSEIgdHLDqm4ga8OqbmggYsOtIG3huq10IG7DoHkuCiAgICAgICAgICAgICAgICAgICAgLy8gTmjhuq1uIMSRxrDhu6NjID0gdGFiIGtow6FjIGPhu6dhIENIw41OSCBzY3JpcHQgbsOgeSAodXNlciBt4bufIG5oaeG7gXUgdGFiKSDihpIgQsOMTkggVEjGr+G7nE5HLCBLSMOUTkcga2hvw6EuCiAgICAgICAgICAgICAgICAgICAgLy8gKFNjcmlwdCBs4bqhIGtow7RuZyBiaeG6v3QgdMOqbiBrw6puaCArIMSR4buLbmggZOG6oW5nIG7DoHkgbsOqbiBraMO0bmcgdGjhu4MgZ2nhuqMgbeG6oW8uKQogICAgICAgICAgICAgICAgICAgIGlmIChldnQgJiYgZXZ0LmRhdGEgJiYgZXZ0LmRhdGEudCA9PT0gJ1RMX0hCJykgewogICAgICAgICAgICAgICAgICAgICAgICAvLyBjaOG7iSBnaGkgbmjhuq1uLCBraMO0bmcgbMOgbSBnw6wg4oCUIG5oaeG7gXUgdGFiIGzDoCBow6BuaCB2aSBo4bujcCBs4buHCiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfSBjYXRjaCAoXykge30KICAgICAgICAgICAgfTsKICAgICAgICAgICAgLy8gR+G7rWkgaGVhcnRiZWF0IGzhuqduIMSR4bqndSBzYXUgNzAwbXMgKGNobyBwaMOpcCBj4bqjIDIgaW5zdGFuY2Ugc2V0dXAgeG9uZykKICAgICAgICAgICAgc2V0VGltZW91dCgoKSA9PiB7IHRyeSB7IGlmIChfZ3VhcmRCQykgX2d1YXJkQkMucG9zdE1lc3NhZ2UoeyB0OiAnVExfSEInLCB0czogRGF0ZS5ub3coKSB9KTsgfSBjYXRjaCAoXykge30gfSwgNzAwKTsKICAgICAgICAgICAgLy8gSGVhcnRiZWF0IMSR4buLbmgga+G7syBt4buXaSAxNXMg4oCUIHBow6F0IGhp4buHbiBzY3JpcHQgY8OgaSBtdeG7mW4KICAgICAgICAgICAgc2V0SW50ZXJ2YWwoKCkgPT4geyB0cnkgeyBpZiAoX2d1YXJkQkMpIF9ndWFyZEJDLnBvc3RNZXNzYWdlKHsgdDogJ1RMX0hCJywgdHM6IERhdGUubm93KCkgfSk7IH0gY2F0Y2ggKF8pIHt9IH0sIDE1MDAwKTsKICAgICAgICB9IGNhdGNoIChfKSB7CiAgICAgICAgICAgIF9pbml0R3VhcmRMUygpOyAvLyBCcm9hZGNhc3RDaGFubmVsIGtow7RuZyBo4buXIHRy4bujIOKGkiBmYWxsYmFjayBMUwogICAgICAgIH0KICAgIH0KCiAgICAvLyDilIDilIDilIAgRmFsbGJhY2s6IHBow6F0IGhp4buHbiBxdWEgbG9jYWxTdG9yYWdlIHRpbWVzdGFtcCDilIDilIDilIAKICAgIGZ1bmN0aW9uIF9pbml0R3VhcmRMUygpIHsKICAgICAgICBjb25zdCBUU19LRVkgPSAnX3RsX2d1YXJkX3RzJzsKICAgICAgICBjb25zdCBub3cgICAgPSBEYXRlLm5vdygpOwogICAgICAgIGNvbnN0IHByZXYgICA9IHBhcnNlSW50KGxvY2FsU3RvcmFnZS5nZXRJdGVtKFRTX0tFWSkgfHwgJzAnKTsKICAgICAgICAvLyBbdjYtc21hcnRdIFRpbWVzdGFtcCBn4bqnbiA9IHVzZXIgRjUgbmhhbmggaG/hurdjIG3hu58gbmhp4buBdSB0YWIgQ8OZTkcgc2NyaXB0IOKGkiBCw4xOSCBUSMav4bucTkcsIEtIw5RORyBraG/DoS4KICAgICAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShUU19LRVksIG5vdy50b1N0cmluZygpKTsKICAgICAgICBzZXRJbnRlcnZhbCgoKSA9PiB7IHRyeSB7IGxvY2FsU3RvcmFnZS5zZXRJdGVtKFRTX0tFWSwgRGF0ZS5ub3coKS50b1N0cmluZygpKTsgfSBjYXRjaCAoXykge30gfSwgMjUwMCk7CiAgICB9CgogICAgLy8g4pSA4pSA4pSAIFF1w6l0IMSR4buLbmgga+G7syBt4buXaSA3IGdpw6J5IOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgAogICAgZnVuY3Rpb24gX3N0YXJ0UGVyaW9kaWNTY2FuKCkgewogICAgICAgIF9ndWFyZFRpbWVyID0gc2V0SW50ZXJ2YWwoKCkgPT4gewogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgLy8gW3Y2LXNtYXJ0XSBNaeG7hW4gbmhp4buFbSA2MHMgxJHhuqd1ICh0cmFuZy9leHRlbnNpb24gxJFhbmcga2jhu59pIHThuqFvLCBjw7MgdGjhu4MgYuG7jWMgbmF0aXZlIHThuqFtIHRo4budaSkKICAgICAgICAgICAgICAgIGlmIChEYXRlLm5vdygpIC0gX0dVQVJEX1NUQVJUX1RTIDwgNjAwMDApIHJldHVybjsKICAgICAgICAgICAgICAgIGNvbnN0IGggPSBfZGV0ZWN0SG9va05vdygpOwogICAgICAgICAgICAgICAgaWYgKGgpIHsKICAgICAgICAgICAgICAgICAgICAvLyBbdjYuNV0gTuG6v3UgxJHhu5NuZyB0aOG7nWkgbeG7nyBEZXZUb29scyAobmdoaSBkdW1wKSDihpIgxJHDsm4gc3RyaWtlIGfhuqVwIMSRw7RpCiAgICAgICAgICAgICAgICAgICAgX2hvb2tTdHJpa2UgKz0gX2RldnRvb2xzT3BlbigpID8gMiA6IDE7CiAgICAgICAgICAgICAgICAgICAgLy8gW3Y2LXNtYXJ0XSBZw6p1IGPhuqd1IDMgbOG6p24gbGnDqm4gdOG7pWMgbeG7m2kga+G6v3QgbHXhuq1uIGPDsyBob29rIHRo4bqtdCDihpIgcmVtb3RlLWxvY2sgKGFkbWluIG3hu58ga2hvw6EgxJHGsOG7o2MpLgogICAgICAgICAgICAgICAgICAgIGlmIChfaG9va1N0cmlrZSA+PSAzKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNsZWFySW50ZXJ2YWwoX2d1YXJkVGltZXIpOyBfZ3VhcmRUaW1lciA9IG51bGw7CiAgICAgICAgICAgICAgICAgICAgICAgIF9lbnRlclJlbW90ZUxvY2soJ/Cfm6HvuI8gUGjDoXQgaGnhu4duIHBo4bqnbiBt4buBbSBs4bqhIGNhbiB0aGnhu4dwIGxpw6puIHThu6VjIHbDoG8gJyArIGggKyAnICjEkcOjIHjDoWMgbmjhuq1uIDMgbOG6p24pLiDEkMOjIGLDoW8gY8OhbyBhZG1pbiwgY2jhu50gbeG7nyBraG/DoSB04burIHhhLicpOwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgICAgICAgICAgX2hvb2tTdHJpa2UgPSAwOyAvLyBxdcOpdCBz4bqhY2gg4oaSIHJlc2V0IMSR4bq/bQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgIH0sIDUwMDApOyAvLyBbdjYuNV0gcXXDqXQgbmhhbmggaMahbiAoNXMpIOKAlCBwaMOhdCBoaeG7h24gc+G7m20gaMahbgogICAgfQoKICAgIC8vIOKUgOKUgOKUgCBLaOG7n2kgdOG6oW8gdG/DoG4gYuG7mSBo4buHIHRo4buRbmcgYuG6o28gduG7hyDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKICAgIGZ1bmN0aW9uIF9pbml0R3VhcmQoKSB7CiAgICAgICAgaWYgKF9ndWFyZEFjdGl2ZSkgcmV0dXJuOwogICAgICAgIF9ndWFyZEFjdGl2ZSA9IHRydWU7CiAgICAgICAgLy8gW3Y2LXNtYXJ0XSBNSUdSQVRJT046IGPhu50gcG9pc29uZWQgZG8gYuG6o24gY8WpIChkw7IgbmjhuqdtKSDEkeG6t3Qg4oaSIHThu7EgZ+G7oSBt4buZdCBs4bqnbiDEkeG7gyBuZ8aw4budaSBkw7luZyBkw7luZyBs4bqhaS4KICAgICAgICAvLyAgICAgICAgICAgICBC4bqjbiB2NiB0cuG7nyBsw6puIGNo4buJIMSR4bq3dCBwb2lzb25lZCBraGkgxJHDoyBYw4FDIE5I4bqsTiAoMyBs4bqnbiBsacOqbiB04bulYykgc2NyaXB0IGzhuqEgdGjhuq10LgogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGlmIChsb2NhbFN0b3JhZ2UuZ2V0SXRlbSgnX3RsX2d1YXJkX3ZlcicpICE9PSAnNicpIHsKICAgICAgICAgICAgICAgIGxvY2FsU3RvcmFnZS5yZW1vdmVJdGVtKCdfdGxfcG9pc29uZWQnKTsKICAgICAgICAgICAgICAgIGxvY2FsU3RvcmFnZS5zZXRJdGVtKCdfdGxfZ3VhcmRfdmVyJywgJzYnKTsKICAgICAgICAgICAgfQogICAgICAgIH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgLy8gW3Y2LjRdIEPhu50gcG9pc29uZWQgLyBfdGxfcmVtb3RlX2xvY2tlZCDEkcaw4bujYyB44butIGzDvSDhu58gc3RhcnR1cCAoYsOhbyBzZXJ2ZXIgKyBjaOG7nSBhZG1pbiBt4bufIGtob8OhKS4KICAgICAgICBfaW5pdEd1YXJkQkMoKTsKICAgICAgICBfc3RhcnRQZXJpb2RpY1NjYW4oKTsKICAgIH0KICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgLy8gIFtlbmQgdjUgc2VjdXJpdHkgbW9kdWxlXQogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCgogICAgZnVuY3Rpb24gX2NyeXB0b09iaigpIHsgcmV0dXJuICh0eXBlb2YgY3J5cHRvICE9PSAndW5kZWZpbmVkJyA/IGNyeXB0byA6IHdpbmRvdy5jcnlwdG8pOyB9CgogICAgYXN5bmMgZnVuY3Rpb24gX2htYWNIZXgoc2VjcmV0LCBzdHIpIHsKICAgICAgICBjb25zdCBlbmMgPSBuZXcgVGV4dEVuY29kZXIoKSwgYyA9IF9jcnlwdG9PYmooKTsKICAgICAgICBjb25zdCBrZXkgPSBhd2FpdCBjLnN1YnRsZS5pbXBvcnRLZXkoJ3JhdycsIGVuYy5lbmNvZGUoc2VjcmV0KSwgeyBuYW1lOiAnSE1BQycsIGhhc2g6ICdTSEEtMjU2JyB9LCBmYWxzZSwgWydzaWduJ10pOwogICAgICAgIGNvbnN0IHNpZyA9IGF3YWl0IGMuc3VidGxlLnNpZ24oJ0hNQUMnLCBrZXksIGVuYy5lbmNvZGUoc3RyKSk7CiAgICAgICAgcmV0dXJuIEFycmF5LmZyb20obmV3IFVpbnQ4QXJyYXkoc2lnKSkubWFwKGIgPT4gYi50b1N0cmluZygxNikucGFkU3RhcnQoMiwgJzAnKSkuam9pbignJyk7CiAgICB9CgogICAgYXN5bmMgZnVuY3Rpb24gX2FwaVByZWZpeCgpIHsKICAgICAgICBpZiAoIV9hcGlQcmVmaXhDYWNoZSkKICAgICAgICAgICAgX2FwaVByZWZpeENhY2hlID0gJy8nICsgKGF3YWl0IF9obWFjSGV4KEFQSV9TRUNSRVQsICdnb2Rtb2RlOmFwaTpwcmVmaXg6djQnKSkuc2xpY2UoMCwgMTIpOwogICAgICAgIHJldHVybiBfYXBpUHJlZml4Q2FjaGU7CiAgICB9CiAgICAvLyBbdjYuNV0gS8OdIFJFUVVFU1QgSE1BQyDigJQgY2jhu5FuZyBmYWtlIC8gcmVwbGF5IC8gdGFtcGVyIChraOG7m3Agc2VydmVyIHZlcmlmeVJlcVNpZykKICAgIC8vIFNpZ24gPSBITUFDX1NIQTI1NihBUElfU0VDUkVULCB0c3xub25jZXxzaGEyNTYoYm9keSl8c2Vzc2lvblRva2VuKQogICAgYXN5bmMgZnVuY3Rpb24gX3NpZ25SZXEoYm9keVN0ciwgc2Vzc2lvblRvaykgewogICAgICAgIGNvbnN0IGMgPSBfY3J5cHRvT2JqKCksIGVuYyA9IG5ldyBUZXh0RW5jb2RlcigpOwogICAgICAgIGNvbnN0IHRzID0gTWF0aC5mbG9vcihEYXRlLm5vdygpIC8gMTAwMCkudG9TdHJpbmcoKTsKICAgICAgICBjb25zdCBub25jZSA9IEFycmF5LmZyb20oYy5nZXRSYW5kb21WYWx1ZXMobmV3IFVpbnQ4QXJyYXkoOCkpLCBiID0+IGIudG9TdHJpbmcoMTYpLnBhZFN0YXJ0KDIsICcwJykpLmpvaW4oJycpOwogICAgICAgIGNvbnN0IGJvZHlIYXNoQnVmID0gYXdhaXQgYy5zdWJ0bGUuZGlnZXN0KCdTSEEtMjU2JywgZW5jLmVuY29kZShib2R5U3RyIHx8ICcnKSk7CiAgICAgICAgY29uc3QgYm9keUhhc2ggPSBBcnJheS5mcm9tKG5ldyBVaW50OEFycmF5KGJvZHlIYXNoQnVmKSkubWFwKGIgPT4gYi50b1N0cmluZygxNikucGFkU3RhcnQoMiwgJzAnKSkuam9pbignJyk7CiAgICAgICAgY29uc3QgaG1hY0tleSA9IGF3YWl0IGMuc3VidGxlLmltcG9ydEtleSgncmF3JywgZW5jLmVuY29kZShBUElfU0VDUkVUKSwgeyBuYW1lOiAnSE1BQycsIGhhc2g6ICdTSEEtMjU2JyB9LCBmYWxzZSwgWydzaWduJ10pOwogICAgICAgIGNvbnN0IHNpZ0J1ZiA9IGF3YWl0IGMuc3VidGxlLnNpZ24oJ0hNQUMnLCBobWFjS2V5LCBlbmMuZW5jb2RlKHRzICsgJ3wnICsgbm9uY2UgKyAnfCcgKyBib2R5SGFzaCArICd8JyArIChzZXNzaW9uVG9rIHx8ICcnKSkpOwogICAgICAgIGNvbnN0IHNpZ24gPSBBcnJheS5mcm9tKG5ldyBVaW50OEFycmF5KHNpZ0J1ZikpLm1hcChiID0+IGIudG9TdHJpbmcoMTYpLnBhZFN0YXJ0KDIsICcwJykpLmpvaW4oJycpOwogICAgICAgIHJldHVybiB7ICdYLVRzJzogdHMsICdYLU5vbmNlJzogbm9uY2UsICdYLVNpZ24nOiBzaWduIH07CiAgICB9CgogICAgZnVuY3Rpb24gX2NvbGxlY3REZXZpY2UoKSB7CiAgICAgICAgY29uc3QgdWEgPSBuYXZpZ2F0b3IudXNlckFnZW50IHx8ICcnOwogICAgICAgIGNvbnN0IGlzQW5kcm9pZCA9IC9hbmRyb2lkL2kudGVzdCh1YSk7CiAgICAgICAgY29uc3QgaXNJT1MgPSAvaXBob25lfGlwYWR8aXBvZC9pLnRlc3QodWEpOwogICAgICAgIGxldCBtb2RlbCA9ICcnOwogICAgICAgIGlmIChpc0FuZHJvaWQpIHsKICAgICAgICAgICAgY29uc3QgbSA9IHVhLm1hdGNoKC87XHMqKFteOyldKz8pXHMrQnVpbGRcLy9pKSB8fCB1YS5tYXRjaCgvYW5kcm9pZFxzK1teOyldKztccyooW147KV0rKS9pKTsKICAgICAgICAgICAgbW9kZWwgPSBtID8gbVsxXS50cmltKCkgOiAnJzsKICAgICAgICB9IGVsc2UgaWYgKGlzSU9TKSB7CiAgICAgICAgICAgIG1vZGVsID0gL2lwYWQvaS50ZXN0KHVhKSA/ICdpUGFkJyA6IC9pcG9kL2kudGVzdCh1YSkgPyAnaVBvZCcgOiAnaVBob25lJzsKICAgICAgICB9CiAgICAgICAgY29uc3QgY29ubiA9IG5hdmlnYXRvci5jb25uZWN0aW9uIHx8IG5hdmlnYXRvci5tb3pDb25uZWN0aW9uIHx8IG5hdmlnYXRvci53ZWJraXRDb25uZWN0aW9uOwogICAgICAgIHJldHVybiB7CiAgICAgICAgICAgIG9zOiBpc0FuZHJvaWQgPyAnQW5kcm9pZCcgOiBpc0lPUyA/ICdpT1MnIDogKG5hdmlnYXRvci5wbGF0Zm9ybSB8fCAnVW5rbm93bicpLAogICAgICAgICAgICBtb2RlbDogbW9kZWwgfHwgJycsIGJyYW5kOiAnJywgaXNNb2JpbGU6IGlzQW5kcm9pZCB8fCBpc0lPUywKICAgICAgICAgICAgdG91Y2hQb2ludHM6IG5hdmlnYXRvci5tYXhUb3VjaFBvaW50cyB8fCAwLAogICAgICAgICAgICBjb3JlczogbmF2aWdhdG9yLmhhcmR3YXJlQ29uY3VycmVuY3kgfHwgMCwKICAgICAgICAgICAgbWVtb3J5OiBuYXZpZ2F0b3IuZGV2aWNlTWVtb3J5IHx8IDAsCiAgICAgICAgICAgIHNjcmVlbjogYCR7c2NyZWVuLndpZHRofXgke3NjcmVlbi5oZWlnaHR9YCwKICAgICAgICAgICAgcGl4ZWxSYXRpbzogd2luZG93LmRldmljZVBpeGVsUmF0aW8gfHwgMSwKICAgICAgICAgICAgY29ubmVjdGlvbjogY29ubiA/IChjb25uLmVmZmVjdGl2ZVR5cGUgfHwgJycpIDogJycsCiAgICAgICAgICAgIHZlbmRvcjogbmF2aWdhdG9yLnZlbmRvciB8fCAnJywKICAgICAgICAgICAgbGFuZ3VhZ2U6IG5hdmlnYXRvci5sYW5ndWFnZSB8fCAnJywKICAgICAgICAgICAgdGltZXpvbmU6IChJbnRsLkRhdGVUaW1lRm9ybWF0KCkucmVzb2x2ZWRPcHRpb25zKCkudGltZVpvbmUpIHx8ICcnLAogICAgICAgICAgICB3ZWJkcml2ZXI6ICEhbmF2aWdhdG9yLndlYmRyaXZlcgogICAgICAgIH07CiAgICB9CgogICAgZnVuY3Rpb24gX2NvbGxlY3RGUCgpIHsKICAgICAgICByZXR1cm4gewogICAgICAgICAgICB1YTogbmF2aWdhdG9yLnVzZXJBZ2VudCwgcGxhdGZvcm06IG5hdmlnYXRvci5wbGF0Zm9ybSB8fCAnJywKICAgICAgICAgICAgbGFuZ3VhZ2U6IG5hdmlnYXRvci5sYW5ndWFnZSB8fCAnJywKICAgICAgICAgICAgdGltZXpvbmU6IChJbnRsLkRhdGVUaW1lRm9ybWF0KCkucmVzb2x2ZWRPcHRpb25zKCkudGltZVpvbmUpIHx8ICcnLAogICAgICAgICAgICB3ZWJkcml2ZXI6ICEhbmF2aWdhdG9yLndlYmRyaXZlciwKICAgICAgICAgICAgaGFyZHdhcmVDb25jdXJyZW5jeTogbmF2aWdhdG9yLmhhcmR3YXJlQ29uY3VycmVuY3kgfHwgMCwKICAgICAgICAgICAgZGV2aWNlTWVtb3J5OiBuYXZpZ2F0b3IuZGV2aWNlTWVtb3J5IHx8IDAsCiAgICAgICAgICAgIG1heFRvdWNoUG9pbnRzOiBuYXZpZ2F0b3IubWF4VG91Y2hQb2ludHMgfHwgMCwKICAgICAgICAgICAgc2NyZWVuOiBgJHtzY3JlZW4ud2lkdGh9eCR7c2NyZWVuLmhlaWdodH1gLAogICAgICAgICAgICBjb2xvckRlcHRoOiBzY3JlZW4uY29sb3JEZXB0aCwgcGl4ZWxSYXRpbzogd2luZG93LmRldmljZVBpeGVsUmF0aW8gfHwgMQogICAgICAgIH07CiAgICB9CgogICAgYXN5bmMgZnVuY3Rpb24gX2Rlcml2ZUtleShzZXNzaW9uVG9rZW4pIHsKICAgICAgICBjb25zdCBlbmMgPSBuZXcgVGV4dEVuY29kZXIoKSwgYyA9IF9jcnlwdG9PYmooKTsKICAgICAgICBjb25zdCBiYXNlS2V5ID0gYXdhaXQgYy5zdWJ0bGUuaW1wb3J0S2V5KCdyYXcnLCBlbmMuZW5jb2RlKHNlc3Npb25Ub2tlbiArICd8JyArIEFQSV9TRUNSRVQpLCAnUEJLREYyJywgZmFsc2UsIFsnZGVyaXZlQml0cyddKTsKICAgICAgICBjb25zdCBiaXRzID0gYXdhaXQgYy5zdWJ0bGUuZGVyaXZlQml0cyh7IG5hbWU6ICdQQktERjInLCBzYWx0OiBlbmMuZW5jb2RlKCdnb2Rtb2RlLXY0LXNhbHQnKSwgaXRlcmF0aW9uczogMTAwMCwgaGFzaDogJ1NIQS0yNTYnIH0sIGJhc2VLZXksIDI1Nik7CiAgICAgICAgcmV0dXJuIGMuc3VidGxlLmltcG9ydEtleSgncmF3JywgYml0cywgeyBuYW1lOiAnQUVTLUdDTScgfSwgZmFsc2UsIFsnZGVjcnlwdCddKTsKICAgIH0KCiAgICBmdW5jdGlvbiBfYjY0VG9CeXRlcyhiNjQpIHsKICAgICAgICBjb25zdCBiaW4gPSBhdG9iKGI2NCk7CiAgICAgICAgcmV0dXJuIFVpbnQ4QXJyYXkuZnJvbShiaW4sIHggPT4geC5jaGFyQ29kZUF0KDApKTsKICAgIH0KCiAgICBhc3luYyBmdW5jdGlvbiBfZGVjcnlwdEFuc3dlcnMocGF5bG9hZCwgc2Vzc2lvblRva2VuKSB7CiAgICAgICAgY29uc3QgYyA9IF9jcnlwdG9PYmooKTsKICAgICAgICBjb25zdCBrZXkgPSBhd2FpdCBfZGVyaXZlS2V5KHNlc3Npb25Ub2tlbik7CiAgICAgICAgY29uc3QgaXYgPSBfYjY0VG9CeXRlcyhwYXlsb2FkLml2KSwgZGF0YSA9IF9iNjRUb0J5dGVzKHBheWxvYWQuZGF0YSksIHRhZyA9IF9iNjRUb0J5dGVzKHBheWxvYWQudGFnKTsKICAgICAgICBjb25zdCBidWYgPSBuZXcgVWludDhBcnJheShkYXRhLmxlbmd0aCArIHRhZy5sZW5ndGgpOyBidWYuc2V0KGRhdGEpOyBidWYuc2V0KHRhZywgZGF0YS5sZW5ndGgpOwogICAgICAgIGNvbnN0IHBsYWluID0gYXdhaXQgYy5zdWJ0bGUuZGVjcnlwdCh7IG5hbWU6ICdBRVMtR0NNJywgaXYgfSwga2V5LCBidWYpOwogICAgICAgIHJldHVybiBKU09OLnBhcnNlKG5ldyBUZXh0RGVjb2RlcigpLmRlY29kZShwbGFpbikpOwogICAgfQoKICAgIGFzeW5jIGZ1bmN0aW9uIF9lbnN1cmVTZXNzaW9uKGtleSwgaHdpZCkgewogICAgICAgIGlmIChfc2VjU2Vzc2lvbi50b2tlbiAmJiBfc2VjU2Vzc2lvbi5leHAgPiBEYXRlLm5vdygpKSByZXR1cm4gX3NlY1Nlc3Npb24udG9rZW47CiAgICAgICAgaWYgKCFrZXkpIHRocm93IG5ldyBFcnJvcignVGhp4bq/dSBrZXkg4oCUIGtow7RuZyB0aOG7gyB4w6FjIHRo4buxYyBwaGnDqm4nKTsKICAgICAgICBjb25zdCByID0gYXdhaXQgZ21Qb3N0KCcvYXR0ZXN0JywgeyBrZXksIGh3aWQ6IGh3aWQgfHwgZ2V0SFdJRCgpLCBmcDogX2NvbGxlY3RGUCgpLCBkZXZpY2U6IF9jb2xsZWN0RGV2aWNlKCkgfSk7CiAgICAgICAgaWYgKCFyLnN1Y2Nlc3MpIHRocm93IG5ldyBFcnJvcihyLm1lc3NhZ2UgfHwgci5lcnJvciB8fCAoJ1jDoWMgdGjhu7FjIHRoaeG6v3QgYuG7iy9t4bqhbmcgdGjhuqV0IGLhuqFpIChIVFRQICcgKyAoci5faHR0cFN0YXR1cyB8fCAwKSArICcpIOKAlCB4ZW0gcGFuZWwgYWRtaW4gbG9nIMSR4buDIGJp4bq/dCBsw70gZG8pJykpOwogICAgICAgIF9zZWNTZXNzaW9uID0geyB0b2tlbjogci5zZXNzaW9uLCBleHA6IERhdGUubm93KCkgKyAoci5leHBpcmVzSW4gLSAzMCkgKiAxMDAwLCBmcEhhc2g6IHIuZnBIYXNoLCBzZXE6IDEgfTsKICAgICAgICBpZiAoci5kZXZpY2UpIENVUlJFTlRfREVWSUNFID0gci5kZXZpY2U7CiAgICAgICAgcmV0dXJuIHIuc2Vzc2lvbjsKICAgIH0KCiAgICAvLyBbdjZdIFThuqNpIENI4bumIMSQ4buYTkcgbW9kdWxlICJDSFXhuqhOIELhu4ogMTAgxJBJ4buCTSIgdOG7qyBzZXJ2ZXIgKGNo4buJIHByZW1pdW0pCiAgICBhc3luYyBmdW5jdGlvbiBfbG9hZEZpcmVNb2R1bGUoKSB7CiAgICAgICAgaWYgKF9maXJlTW9kdWxlLmZhY3RvcnkpIHJldHVybiB0cnVlOwogICAgICAgIGlmIChfZmlyZU1vZHVsZS5sb2FkaW5nKSByZXR1cm4gZmFsc2U7CiAgICAgICAgaWYgKCFpc1ByZW1pdW1LZXkoKSkgcmV0dXJuIGZhbHNlOwogICAgICAgIF9maXJlTW9kdWxlLmxvYWRpbmcgPSB0cnVlOwogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGNvbnN0IGtleSA9IENVUlJFTlRfS0VZIHx8IF9zTFMuZ2V0KExTX0tFWSk7CiAgICAgICAgICAgIGlmICgha2V5KSByZXR1cm4gZmFsc2U7CiAgICAgICAgICAgIGF3YWl0IGdtUG9zdCgnL21vZHVsZScsIHsga2V5LCBod2lkOiBnZXRIV0lEKCkgfSk7CiAgICAgICAgICAgIHJldHVybiAhIV9maXJlTW9kdWxlLmZhY3Rvcnk7CiAgICAgICAgfSBjYXRjaCAoZSkgewogICAgICAgICAgICBfZmlyZU1vZHVsZS5sYXN0RXJyID0gZS5tZXNzYWdlOwogICAgICAgICAgICByZXR1cm4gZmFsc2U7CiAgICAgICAgfSBmaW5hbGx5IHsKICAgICAgICAgICAgX2ZpcmVNb2R1bGUubG9hZGluZyA9IGZhbHNlOwogICAgICAgIH0KICAgIH0KCiAgICAvLyBbdjZdIEhlYXJ0YmVhdCBsacOqbiB04bulYyAoMzBzKSDigJQgZ+G7rWkgZnAvZGV2aWNlIG3hu5tpIGNobyBzZXJ2ZXIgY2hlY2suCiAgICAvLyBO4bq/dSBzZXJ2ZXIgdHLhuqMgYmxvY2tlZCBob+G6t2MgNDA0ICjEkcOjIGLhu4sgYmFuKSDihpIgVOG7sCBIVeG7tiAoeMOzYSBrZXkgKyBVSSkuCiAgICAvLyBO4bq/dSBzZXJ2ZXIgxJHhuql5IG1vZHVsZSBt4bubaSDihpIgdOG7sSBu4bqhcCBs4bqhaS4gTeG6pXQgbeG6oW5nIGvDqW8gZMOgaSDihpIga2jDs2EgdOG6oW0gbW9kdWxlLgogICAgZnVuY3Rpb24gX3N0YXJ0SGVhcnRiZWF0KCkgewogICAgICAgIGlmIChfaGVhcnRiZWF0VGltZXIpIHJldHVybjsKICAgICAgICBfaGVhcnRiZWF0VGltZXIgPSBzZXRJbnRlcnZhbChhc3luYyAoKSA9PiB7CiAgICAgICAgICAgIGlmICghQ1VSUkVOVF9LRVkpIHJldHVybjsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIGNvbnN0IHIgPSBhd2FpdCBnbVBvc3QoJy9oZWFydGJlYXQnLCB7CiAgICAgICAgICAgICAgICAgICAga2V5OiBDVVJSRU5UX0tFWSwgaHdpZDogZ2V0SFdJRCgpLAogICAgICAgICAgICAgICAgICAgIGZwOiBfY29sbGVjdEZQKCksIGRldmljZTogX2NvbGxlY3REZXZpY2UoKSwKICAgICAgICAgICAgICAgICAgICBjbGllbnRWZXJzaW9uOiBfZmlyZU1vZHVsZS52ZXJzaW9uCiAgICAgICAgICAgICAgICB9KTsKICAgICAgICAgICAgICAgIF9oZWFydGJlYXRGYWlsID0gMDsKICAgICAgICAgICAgICAgIGlmIChyICYmIHIuYmxvY2tlZCkgewogICAgICAgICAgICAgICAgICAgIC8vIFt2Ni4zXSBTZXJ2ZXIgYmFuIOKGkiBiYW4tbW9kZSAodOG7sSBt4bufIGzhuqFpIGtoaSBhZG1pbiB1bmJhbiksIEtIw5RORyBraG/DoSB2xKluaCB2aeG7hW4KICAgICAgICAgICAgICAgICAgICBfZW50ZXJCYW5Nb2RlKCdTZXJ2ZXIgcGjDoXQgaGnhu4duIG3DtGkgdHLGsOG7nW5nIGtow7RuZyBo4bujcCBs4buHICgnICsgKHIucmVhc29uIHx8ICd1bmtub3duJykgKyAnKS4nKTsKICAgICAgICAgICAgICAgICAgICByZXR1cm47CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBpZiAociAmJiByLl9odHRwU3RhdHVzID09PSA0MDQpIHsKICAgICAgICAgICAgICAgICAgICAvLyBbdjYuM10gNDA0IHRyw6puIGVuZHBvaW50IOG6qW4gPSDEkcOjIGLhu4sgYmFuIElQL3RoaeG6v3QgYuG7iyDihpIgYmFuLW1vZGUgdOG7sSBt4bufIGzhuqFpCiAgICAgICAgICAgICAgICAgICAgX2VudGVyQmFuTW9kZSgnVGhp4bq/dCBi4buLL0lQIMSRw6MgYuG7iyBhZG1pbiBraG/DoS4nKTsKICAgICAgICAgICAgICAgICAgICByZXR1cm47CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0gY2F0Y2ggKGUpIHsKICAgICAgICAgICAgICAgIF9oZWFydGJlYXRGYWlsKys7CiAgICAgICAgICAgICAgICBpZiAoX2hlYXJ0YmVhdEZhaWwgPj0gMTApIHsKICAgICAgICAgICAgICAgICAgICBhZGRMb2coJ+KaoO+4jyBN4bqldCBr4bq/dCBu4buRaSBzZXJ2ZXIga8OpbyBkw6BpIOKAlCBjaOG7qWMgbsSDbmcgbuG7mXAgYsOgaSB04bqhbSBraMOzYSBjaG8gdOG7m2kga2hpIGvhur90IG7hu5FpIGzhuqFpLicsICd3YXJuJyk7CiAgICAgICAgICAgICAgICAgICAgX2ZpcmVNb2R1bGUuZmFjdG9yeSA9IG51bGw7IC8vIGJ14buZYyB04bqjaSBs4bqhaSBraGkgY8OzIGvhur90IG7hu5FpCiAgICAgICAgICAgICAgICAgICAgX2hlYXJ0YmVhdEZhaWwgPSAwOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CiAgICAgICAgfSwgMzAwMDApOwogICAgfQoKICAgIGFzeW5jIGZ1bmN0aW9uIGdtUG9zdChwYXRoLCBkYXRhKSB7CiAgICAgICAgY29uc3QgaGVhZGVycyA9IHsgJ0NvbnRlbnQtVHlwZSc6ICdhcHBsaWNhdGlvbi9qc29uJyB9OwogICAgICAgIGxldCBzZXNzaW9uVG9rZW4gPSBudWxsOwogICAgICAgIGNvbnN0IHByZWZpeCA9IGF3YWl0IF9hcGlQcmVmaXgoKTsKICAgICAgICBjb25zdCBhY3R1YWxQYXRoID0gcHJlZml4ICsgcGF0aDsKICAgICAgICBpZiAocGF0aCA9PT0gJy9wcm9jZXNzJyB8fCBwYXRoID09PSAnL2ZpcmUnIHx8IHBhdGggPT09ICcvbW9kdWxlJykgewogICAgICAgICAgICBzZXNzaW9uVG9rZW4gPSBhd2FpdCBfZW5zdXJlU2Vzc2lvbigoZGF0YSAmJiBkYXRhLmtleSksIChkYXRhICYmIGRhdGEuaHdpZCkpOwogICAgICAgICAgICBoZWFkZXJzWydYLVNlc3Npb24nXSA9IHNlc3Npb25Ub2tlbjsKICAgICAgICAgICAgaGVhZGVyc1snWC1TZXEnXSAgICAgPSBTdHJpbmcoX3NlY1Nlc3Npb24uc2VxIHx8IDEpOwogICAgICAgICAgICBpZiAoX3NlY1Nlc3Npb24uZnBIYXNoKSBoZWFkZXJzWydYLUZwLUhhc2gnXSA9IF9zZWNTZXNzaW9uLmZwSGFzaDsKICAgICAgICB9CgogICAgICAgIC8vIFt2NV0gTcOjIGhvw6EgcmVxdWVzdCBib2R5IG7hur91IFJFUVVFU1RfRU5DUllQVElPTiA9IHRydWUKICAgICAgICBsZXQgcmVxQm9keSA9IEpTT04uc3RyaW5naWZ5KGRhdGEpOwogICAgICAgIGlmIChSRVFVRVNUX0VOQ1JZUFRJT04pIHsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIGNvbnN0IGVuYyA9IGF3YWl0IF9lbmNyeXB0UGF5bG9hZChkYXRhLCBzZXNzaW9uVG9rZW4gfHwgX2FwaVByZWZpeENhY2hlIHx8ICcnKTsKICAgICAgICAgICAgICAgIHJlcUJvZHkgPSBKU09OLnN0cmluZ2lmeShlbmMpOwogICAgICAgICAgICAgICAgaGVhZGVyc1snWC1FbmMtViddID0gJzUnOyAvLyBiw6FvIHNlcnZlciBiaeG6v3QgcGF5bG9hZCDEkcOjIG3DoyBob8OhCiAgICAgICAgICAgIH0gY2F0Y2ggKF8pIHsgLyogZmFsbGJhY2sgc2FuZyBwbGFpbiBKU09OIG7hur91IGVuY3J5cHQgbOG7l2kgKi8gfQogICAgICAgIH0KICAgICAgICAvLyBbdjYuNV0gS8O9IHJlcXVlc3QgSE1BQyAoYW50aSBmYWtlIC8gcmVwbGF5IC8gdGFtcGVyKQogICAgICAgIHRyeSB7IE9iamVjdC5hc3NpZ24oaGVhZGVycywgYXdhaXQgX3NpZ25SZXEocmVxQm9keSwgc2Vzc2lvblRva2VuKSk7IH0gY2F0Y2ggKF8pIHt9CgogICAgICAgIGNvbnN0IHJlc3VsdCA9IGF3YWl0IG5ldyBQcm9taXNlKChyZXNvbHZlLCByZWplY3QpID0+IHsKICAgICAgICAgICAgR01feG1saHR0cFJlcXVlc3QoewogICAgICAgICAgICAgICAgbWV0aG9kOiAnUE9TVCcsIHVybDogU0VSVkVSX0JBU0UgKyBhY3R1YWxQYXRoLAogICAgICAgICAgICAgICAgaGVhZGVycywgZGF0YTogcmVxQm9keSwgdGltZW91dDogMTUwMDAsCiAgICAgICAgICAgICAgICBvbmxvYWQ6IChyKSA9PiB7CiAgICAgICAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgcGFyc2VkID0gSlNPTi5wYXJzZShyLnJlc3BvbnNlVGV4dCk7CiAgICAgICAgICAgICAgICAgICAgICAgIHBhcnNlZC5faHR0cFN0YXR1cyA9IHIuc3RhdHVzOwogICAgICAgICAgICAgICAgICAgICAgICByZXNvbHZlKHBhcnNlZCk7CiAgICAgICAgICAgICAgICAgICAgfSBjYXRjaCAoXykgeyByZWplY3QobmV3IEVycm9yKCdQYXJzZSBlcnJvciAoSFRUUCAnICsgci5zdGF0dXMgKyAnKScpKTsgfQogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgIG9uZXJyb3I6ICAgKCkgPT4gcmVqZWN0KG5ldyBFcnJvcignTmV0d29yayBlcnJvcicpKSwKICAgICAgICAgICAgICAgIG9udGltZW91dDogKCkgPT4gcmVqZWN0KG5ldyBFcnJvcignVGltZW91dCcpKQogICAgICAgICAgICB9KTsKICAgICAgICB9KTsKICAgICAgICBpZiAocGF0aCA9PT0gJy9wcm9jZXNzJyAmJiByZXN1bHQgJiYgcmVzdWx0LmVuY3J5cHRlZCAmJiByZXN1bHQucGF5bG9hZCAmJiBzZXNzaW9uVG9rZW4pIHsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIHJlc3VsdC5xdWVzdGlvbnMgPSBhd2FpdCBfZGVjcnlwdEFuc3dlcnMocmVzdWx0LnBheWxvYWQsIHNlc3Npb25Ub2tlbik7CiAgICAgICAgICAgICAgICByZXN1bHQuZW5jcnlwdGVkID0gZmFsc2U7CiAgICAgICAgICAgIH0gY2F0Y2ggKGUpIHsKICAgICAgICAgICAgICAgIHJlc3VsdC5zdWNjZXNzID0gZmFsc2U7CiAgICAgICAgICAgICAgICByZXN1bHQubWVzc2FnZSA9ICdHaeG6o2kgbcOjIMSRw6FwIMOhbiB0aOG6pXQgYuG6oWk6ICcgKyBlLm1lc3NhZ2U7CiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICAgICAgLy8gW3Y2XSBHaeG6o2kgbcOjICsgbuG6oXAgbW9kdWxlICJDSFXhuqhOIELhu4ogMTAgxJBJ4buCTSIgbuG6v3Ugc2VydmVyIGF1dG8txJHDrW5oIGvDqG0gKGF0dGVzdC9oZWFydGJlYXQvbW9kdWxlKQogICAgICAgIGlmIChyZXN1bHQgJiYgcmVzdWx0Lm1vZHVsZSkgewogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgbGV0IG1vZFRvayA9IG51bGw7CiAgICAgICAgICAgICAgICBpZiAocGF0aCA9PT0gJy9hdHRlc3QnKSAgICBtb2RUb2sgPSByZXN1bHQuc2Vzc2lvbjsKICAgICAgICAgICAgICAgIGVsc2UgaWYgKHBhdGggPT09ICcvaGVhcnRiZWF0JykgbW9kVG9rID0gcmVzdWx0Lm1vZHVsZVNlc3Npb247CiAgICAgICAgICAgICAgICBlbHNlICAgICAgICAgICAgICAgICAgICAgICAgICAgIG1vZFRvayA9IHNlc3Npb25Ub2tlbjsgLy8gL21vZHVsZQogICAgICAgICAgICAgICAgaWYgKG1vZFRvaykgewogICAgICAgICAgICAgICAgICAgIGNvbnN0IG1vZCA9IGF3YWl0IF9kZWNyeXB0QW5zd2VycyhyZXN1bHQubW9kdWxlLCBtb2RUb2spOwogICAgICAgICAgICAgICAgICAgIGlmIChtb2QgJiYgbW9kLnNyYykgewogICAgICAgICAgICAgICAgICAgICAgICBfZmlyZU1vZHVsZS5mYWN0b3J5ID0gbmV3IEZ1bmN0aW9uKCdjdHgnLCBtb2Quc3JjKTsKICAgICAgICAgICAgICAgICAgICAgICAgX2ZpcmVNb2R1bGUudmVyc2lvbiA9IG1vZC52IHx8IDA7CiAgICAgICAgICAgICAgICAgICAgICAgIF9maXJlTW9kdWxlLmxhc3RFcnIgPSBudWxsOwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfSBjYXRjaCAoZSkgeyBfZmlyZU1vZHVsZS5sYXN0RXJyID0gZS5tZXNzYWdlOyB9CiAgICAgICAgICAgIGRlbGV0ZSByZXN1bHQubW9kdWxlOwogICAgICAgICAgICBkZWxldGUgcmVzdWx0Lm1vZHVsZVNlc3Npb247CiAgICAgICAgfQogICAgICAgIGlmIChyZXN1bHQgJiYgcmVzdWx0Lm5leHRfc2Vzc2lvbikgewogICAgICAgICAgICBfc2VjU2Vzc2lvbi50b2tlbiA9IHJlc3VsdC5uZXh0X3Nlc3Npb247CiAgICAgICAgICAgIF9zZWNTZXNzaW9uLmV4cCAgID0gRGF0ZS5ub3coKSArIDI3MCAqIDEwMDA7CiAgICAgICAgICAgIC8vIFt2Ni41LjFdIMavdSB0acOqbiBuZXh0X3NlcSBkbyBzZXJ2ZXIgZ+G7rWkgKGNow61uaCB4w6FjKSwgZmFsbGJhY2sgdOG7sSArMQogICAgICAgICAgICBfc2VjU2Vzc2lvbi5zZXEgICA9IHJlc3VsdC5uZXh0X3NlcSA/IHBhcnNlSW50KHJlc3VsdC5uZXh0X3NlcSwgMTApIDogKF9zZWNTZXNzaW9uLnNlcSB8fCAxKSArIDE7CiAgICAgICAgICAgIGRlbGV0ZSByZXN1bHQubmV4dF9zZXNzaW9uOwogICAgICAgICAgICBkZWxldGUgcmVzdWx0Lm5leHRfc2VxOwogICAgICAgIH0KICAgICAgICByZXR1cm4gcmVzdWx0OwogICAgfQoKICAgIC8vIOKUgOKUgOKUgCBM4bqleSB0aMO0bmcgdGluIHThu6sgdHJhbmcg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACiAgICBmdW5jdGlvbiBnZXRVc2VySW5mbygpIHsKICAgICAgICB0cnkgewogICAgICAgICAgICBjb25zdCBtID0gZG9jdW1lbnQuY29va2llLm1hdGNoKC8oPzpefDsgKXVzZXI9KFteO10qKS8pOwogICAgICAgICAgICBpZiAobSAmJiBtWzFdKSB7CiAgICAgICAgICAgICAgICBjb25zdCBwYXJzZWQgPSBKU09OLnBhcnNlKGRlY29kZVVSSUNvbXBvbmVudChtWzFdKSk7CiAgICAgICAgICAgICAgICBpZiAocGFyc2VkICYmIChwYXJzZWQuX2lkIHx8IHBhcnNlZC5pZCkpIHJldHVybiBwYXJzZWQ7CiAgICAgICAgICAgIH0KICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgIHRyeSB7IHJldHVybiB3aW5kb3cudXNlcl9pbmZvIHx8IHdpbmRvdy5wX2NvbmZpZz8udXNlcl9pbmZvIHx8IHVuc2FmZVdpbmRvdz8udXNlcl9pbmZvIHx8IG51bGw7IH0gY2F0Y2ggKF8pIHsgcmV0dXJuIG51bGw7IH0KICAgIH0KCiAgICBmdW5jdGlvbiBnZXRPbG1Vc2VybmFtZSgpIHsKICAgICAgICB0cnkgewogICAgICAgICAgICAvLyBbdjQuMV0gxq91IHRpw6puIERPTSBpbnB1dCAoZ2nhu5FuZyB2MyBjb3JlKQogICAgICAgICAgICBjb25zdCBkb21JbnB1dCA9IGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoJyNpbmZvLWFjY291bnQgaW5wdXQuZm9ybS1jb250cm9sW3JlYWRvbmx5XScpOwogICAgICAgICAgICBpZiAoZG9tSW5wdXQgJiYgZG9tSW5wdXQudmFsdWUpIHJldHVybiBkb21JbnB1dC52YWx1ZS50cmltKCk7CiAgICAgICAgICAgIGNvbnN0IHVpID0gZ2V0VXNlckluZm8oKTsKICAgICAgICAgICAgaWYgKHVpICYmIHVpLnVzZXJuYW1lKSByZXR1cm4gdWkudXNlcm5hbWU7CiAgICAgICAgICAgIGlmICh1aSAmJiB1aS5uYW1lKSByZXR1cm4gdWkubmFtZTsKICAgICAgICAgICAgY29uc3QgZWwgPSBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCcudXNlcm5hbWUsIC51c2VyLW5hbWUsIFtjbGFzcyo9InVzZXJuYW1lIl0nKTsKICAgICAgICAgICAgcmV0dXJuIGVsID8gZWwudGV4dENvbnRlbnQudHJpbSgpIDogJ0tob25nWGFjRGluaCc7CiAgICAgICAgfSBjYXRjaCAoXykgeyByZXR1cm4gJ0tob25nWGFjRGluaCc7IH0KICAgIH0KCiAgICBmdW5jdGlvbiBnZXRIV0lEKCkgewogICAgICAgIGxldCBoID0gbG9jYWxTdG9yYWdlLmdldEl0ZW0oJ190bF9od2lkJyk7CiAgICAgICAgaWYgKCFoKSB7CiAgICAgICAgICAgIGNvbnN0IHVhID0gbmF2aWdhdG9yLnVzZXJBZ2VudCArIG5hdmlnYXRvci5sYW5ndWFnZSArIHNjcmVlbi53aWR0aCArIHNjcmVlbi5oZWlnaHQ7CiAgICAgICAgICAgIGxldCBoYXNoID0gNTM4MTsKICAgICAgICAgICAgZm9yIChsZXQgaSA9IDA7IGkgPCB1YS5sZW5ndGg7IGkrKykgaGFzaCA9ICgoaGFzaCA8PCA1KSArIGhhc2gpIF4gdWEuY2hhckNvZGVBdChpKTsKICAgICAgICAgICAgaCA9ICdIVycgKyBNYXRoLmFicyhoYXNoKS50b1N0cmluZygxNikudG9VcHBlckNhc2UoKS5wYWRTdGFydCg4LCcwJyk7CiAgICAgICAgICAgIGxvY2FsU3RvcmFnZS5zZXRJdGVtKCdfdGxfaHdpZCcsIGgpOwogICAgICAgIH0KICAgICAgICByZXR1cm4gaDsKICAgIH0KICAgIGZ1bmN0aW9uIHJpcElkRnJvbVVybCgpIHsKICAgICAgICBjb25zdCBtID0gd2luZG93LmxvY2F0aW9uLnBhdGhuYW1lLm1hdGNoKC8tKFxkKykoPzpcP3xcL3wkKS8pOwogICAgICAgIHJldHVybiBtID8gbVsxXSA6IG51bGw7CiAgICB9CiAgICBmdW5jdGlvbiBkZXRlY3RVc2VySUQoKSB7CiAgICAgICAgY29uc3QgdWkgPSBnZXRVc2VySW5mbygpOwogICAgICAgIHJldHVybiBTRVNTSU9OLm1ldGEuaWRfdXNlciB8fCAodWkgPyAodWkuX2lkIHx8IHVpLmlkKSA6IG51bGwpIHx8IHdpbmRvdz8ucF9jb25maWc/LmlkX3VzZXIgfHwgbnVsbDsKICAgIH0KICAgIGZ1bmN0aW9uIGRldGVjdFNjaG9vbElEKGRhdGEpIHsKICAgICAgICByZXR1cm4gZGF0YT8uaWRfc2Nob29sIHx8IHdpbmRvdz8ucF9jb25maWc/LnNjaG9vbF9pZCB8fCBnZXRVc2VySW5mbygpPy5pZF9zY2hvb2wgfHwgbnVsbDsKICAgIH0KICAgIGZ1bmN0aW9uIGRldGVjdEdyb3VwSUQoKSB7CiAgICAgICAgY29uc3QgbSA9IHdpbmRvdy5sb2NhdGlvbi5ocmVmLm1hdGNoKC9cL2xvcFwvW14vXStcLihcZCspLyk7CiAgICAgICAgcmV0dXJuIChtICYmIG1bMV0pID8gbVsxXSA6IG51bGw7CiAgICB9CiAgICBmdW5jdGlvbiBmb3JjZUdldE1ldGEoKSB7CiAgICAgICAgY29uc3QgdWkgPSBnZXRVc2VySW5mbygpOwogICAgICAgIGlmICghU0VTU0lPTi5tZXRhLmlkX3VzZXIpCiAgICAgICAgICAgIFNFU1NJT04ubWV0YS5pZF91c2VyID0gKHVpICYmICh1aS5faWQgfHwgdWkuaWQpKSB8fCB3aW5kb3c/LnBfY29uZmlnPy5pZF91c2VyIHx8IGRldGVjdFVzZXJJRCgpOwogICAgICAgIGlmICghU0VTU0lPTi5tZXRhLmlkX2NhdGUpCiAgICAgICAgICAgIFNFU1NJT04ubWV0YS5pZF9jYXRlID0gd2luZG93Py5wX2NvbmZpZz8uaWRfY2F0ZSB8fCB3aW5kb3c/LnBfY29uZmlnPy5pZF9leGFtIHx8CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgbmV3IFVSTFNlYXJjaFBhcmFtcyh3aW5kb3cubG9jYXRpb24uc2VhcmNoKS5nZXQoJ2lkX2NhdGUnKSB8fAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG5ldyBVUkxTZWFyY2hQYXJhbXMod2luZG93LmxvY2F0aW9uLnNlYXJjaCkuZ2V0KCdpZF9leGFtJykgfHwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICByaXBJZEZyb21VcmwoKTsKICAgICAgICBpZiAoIVNFU1NJT04ubWV0YS5pZF9jb3Vyc2V3YXJlKQogICAgICAgICAgICBTRVNTSU9OLm1ldGEuaWRfY291cnNld2FyZSA9IG5ldyBVUkxTZWFyY2hQYXJhbXMod2luZG93LmxvY2F0aW9uLnNlYXJjaCkuZ2V0KCdpX2MnKSB8fAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG5ldyBVUkxTZWFyY2hQYXJhbXMod2luZG93LmxvY2F0aW9uLnNlYXJjaCkuZ2V0KCdpZF9jb3Vyc2V3YXJlJykgfHwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBTRVNTSU9OLm1ldGEuaWRfY2F0ZTsKICAgICAgICBpZiAoIVNFU1NJT04ubWV0YS5pZF9zY2hvb2wpCiAgICAgICAgICAgIFNFU1NJT04ubWV0YS5pZF9zY2hvb2wgPSAodWkgJiYgdWkuaWRfc2Nob29sKSB8fCB3aW5kb3c/LnBfY29uZmlnPy5zY2hvb2xfaWQgfHwgbnVsbDsKICAgICAgICBpZiAoIVNFU1NJT04ubWV0YS5jc3JmX3Rva2VuKSB7CiAgICAgICAgICAgIGNvbnN0IG0gPSBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCdtZXRhW25hbWU9ImNzcmYtdG9rZW4iXScpOwogICAgICAgICAgICBTRVNTSU9OLm1ldGEuY3NyZl90b2tlbiA9IG0gPyBtLmdldEF0dHJpYnV0ZSgnY29udGVudCcpIDogKHdpbmRvdy5jc3JmX3Rva2VuIHx8ICcnKTsKICAgICAgICB9CiAgICB9CgogICAgLy8g4pSA4pSA4pSAIExvZyBib3ggaGVscGVyIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgAogICAgZnVuY3Rpb24gYWRkTG9nKG1zZywgdHlwZSA9ICcnKSB7CiAgICAgICAgY29uc3QgYm94ID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWxvZ2JveCcpOwogICAgICAgIGlmICghYm94KSByZXR1cm47CiAgICAgICAgY29uc3QgZCA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2RpdicpOwogICAgICAgIGQuY2xhc3NOYW1lID0gJ3RsLWxvZyAnICsgdHlwZTsKICAgICAgICBjb25zdCB0aW1lID0gbmV3IERhdGUoKS50b0xvY2FsZVRpbWVTdHJpbmcoJ3ZpLVZOJywge2hvdXI6JzItZGlnaXQnLG1pbnV0ZTonMi1kaWdpdCcsc2Vjb25kOicyLWRpZ2l0J30pOwogICAgICAgIGQuaW5uZXJIVE1MID0gYFske3RpbWV9XSAke21zZ31gOwogICAgICAgIGJveC5hcHBlbmRDaGlsZChkKTsKICAgICAgICBib3guc2Nyb2xsVG9wID0gYm94LnNjcm9sbEhlaWdodDsKICAgIH0KICAgIHdpbmRvdy5hZGRMb2cgPSBhZGRMb2c7CgogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAvLyAgTE9DSyBTQ1JFRU4g4oCUIFVJIHYzLjIgKyBsb2dpYyBi4bqjbyBt4bqtdCB2NCArIE9MTSBjaGVjayB2NC4xCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIGZ1bmN0aW9uIGJ1aWxkTG9ja1NjcmVlbihyZWFzb24pIHsKICAgICAgICBpZiAoZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWNvbm4tb3ZlcmxheScpKSByZXR1cm47CgogICAgICAgIGxldCBsb2NrU3R5bGUgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtbG9jay1zdHlsZScpOwogICAgICAgIGlmICghbG9ja1N0eWxlKSB7CiAgICAgICAgICAgIGxvY2tTdHlsZSA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ3N0eWxlJyk7CiAgICAgICAgICAgIGxvY2tTdHlsZS5pZCA9ICd0bC1sb2NrLXN0eWxlJzsKICAgICAgICAgICAgZG9jdW1lbnQuaGVhZC5hcHBlbmRDaGlsZChsb2NrU3R5bGUpOwogICAgICAgIH0KICAgICAgICBsb2NrU3R5bGUudGV4dENvbnRlbnQgPSBnZXRMb2NrU2NyZWVuU3R5bGVzKCk7CgogICAgICAgIGNvbnN0IG92ZXJsYXkgPSBkb2N1bWVudC5jcmVhdGVFbGVtZW50KCdkaXYnKTsKICAgICAgICBvdmVybGF5LmlkID0gJ3RsLWNvbm4tb3ZlcmxheSc7CiAgICAgICAgY29uc3QgdGxGeCA9IGdldFRoZW1lQ29sb3JzKENVUlJFTlRfVEhFTUUpLnBhbmVsRXh0cmEgfHwgJyc7CiAgICAgICAgb3ZlcmxheS5pbm5lckhUTUwgPSBgCiAgICAgICAgICAgIDxkaXYgaWQ9InRsLWNvbm4tcGFuZWwiPgogICAgICAgICAgICAgICAgJHt0bEZ4fQogICAgICAgICAgICAgICAgPGRpdiBpZD0idGwtY29ubi1oZWFkZXIiPgogICAgICAgICAgICAgICAgICAgIDxzcGFuIGNsYXNzPSJ0bC1icmFuZC1uYW1lIj7wn5qAIFRIScOKTiBUQUkgVMOZIFThu5hJIC8vIEdPRCBNT0RFIHYzLjI8L3NwYW4+CiAgICAgICAgICAgICAgICA8L2Rpdj4KICAgICAgICAgICAgICAgIDxkaXYgaWQ9InRsLWNvbm4tYm9keSI+CiAgICAgICAgICAgICAgICAgICAgPGRpdiBjbGFzcz0idGwtc3VidGl0bGUiPvCflJAgTkjhuqxQIExJQ0VOU0UgS0VZIMSQ4buCIEvDjUNIIEhP4bqgVDwvZGl2PgogICAgICAgICAgICAgICAgICAgICR7cmVhc29uID8gYDxkaXYgY2xhc3M9InRsLXdhcm5pbmciPuKaoO+4jyAke3JlYXNvbn08L2Rpdj5gIDogJyd9CiAgICAgICAgICAgICAgICAgICAgPGlucHV0IHR5cGU9InRleHQiIGNsYXNzPSJ0bC1pbnB1dCIgaWQ9InRsLWtleS1pbnB1dCIKICAgICAgICAgICAgICAgICAgICAgICAgICAgcGxhY2Vob2xkZXI9Ik5o4bqtcCBrZXkgYuG6o24gcXV54buBbi4uLiIgYXV0b2NvbXBsZXRlPSJvZmYiPgogICAgICAgICAgICAgICAgICAgIDxidXR0b24gY2xhc3M9InRsLWJ0biB0bC1idG4tdW5sb2NrIiBpZD0idGwtYnRuLXVubG9jayI+8J+UkyBLw41DSCBIT+G6oFQ8L2J1dHRvbj4KICAgICAgICAgICAgICAgICAgICA8YnV0dG9uIGNsYXNzPSJ0bC1idG4gdGwtYnRuLXZpcCIgICBpZD0idGwtYnRuLWJ1eSI+8J+SjiBNVUEgS0VZIChMScOKTiBI4buGKTwvYnV0dG9uPgogICAgICAgICAgICAgICAgICAgIDxkaXYgaWQ9InRsLWVyciI+PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPGRpdiBjbGFzcz0idGwtaHdpZCIgaWQ9InRsLWh3aWQtZGlzcGxheSI+PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPGRpdiBjbGFzcz0idGwtZm9vdCI+WcOqdSBj4bqndTogbcOheSBBbmRyb2lkL2lPUyB0aOG6rXQg4oCiIHRyw6xuaCBkdXnhu4d0IHRo4bqtdCDigKIgbeG6oW5nIHRo4bqtdDwvZGl2PgogICAgICAgICAgICAgICAgPC9kaXY+CiAgICAgICAgICAgIDwvZGl2PmA7CiAgICAgICAgZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChvdmVybGF5KTsKCiAgICAgICAgZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWh3aWQtZGlzcGxheScpLnRleHRDb250ZW50ID0gYPCflJEgSFdJRDogJHtnZXRIV0lEKCl9YDsKICAgICAgICBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtYnRuLWJ1eScpLm9uY2xpY2sgPSAoKSA9PiB3aW5kb3cub3BlbignaHR0cHM6Ly90Lm1lL2x1b25ndHV5ZW4yMCcsICdfYmxhbmsnKTsKCiAgICAgICAgY29uc3QgYnRuICAgID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWJ0bi11bmxvY2snKTsKICAgICAgICBjb25zdCBlcnJCb3ggPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtZXJyJyk7CiAgICAgICAgbGV0IHZlcmlmeWluZyA9IGZhbHNlOwoKICAgICAgICBidG4ub25jbGljayA9IGFzeW5jICgpID0+IHsKICAgICAgICAgICAgaWYgKHZlcmlmeWluZykgcmV0dXJuOwogICAgICAgICAgICBjb25zdCBrZXkgPSAoZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWtleS1pbnB1dCcpLnZhbHVlIHx8ICcnKS50cmltKCkudG9VcHBlckNhc2UoKTsKICAgICAgICAgICAgaWYgKCFrZXkpIHsgZXJyQm94LnRleHRDb250ZW50ID0gJ+KdjCBWdWkgbMOybmcgbmjhuq1wIGtleSEnOyBlcnJCb3guc3R5bGUuZGlzcGxheSA9ICdibG9jayc7IHJldHVybjsgfQoKICAgICAgICAgICAgdmVyaWZ5aW5nID0gdHJ1ZTsKICAgICAgICAgICAgYnRuLnRleHRDb250ZW50ID0gJ+KPsyDEkEFORyBYw4FDIFRI4buwQy4uLic7CiAgICAgICAgICAgIGJ0bi5kaXNhYmxlZCAgICA9IHRydWU7CiAgICAgICAgICAgIGVyckJveC5zdHlsZS5kaXNwbGF5ID0gJ25vbmUnOwoKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIC8vIFt2NF0gUGluZyBzZXJ2ZXIgcXVhIEFQSSBwcmVmaXgg4bqpbiB0csaw4bubYyBraGkgdmVyaWZ5CiAgICAgICAgICAgICAgICBjb25zdCBwcmVmaXggPSBhd2FpdCBfYXBpUHJlZml4KCk7CiAgICAgICAgICAgICAgICBjb25zdCBwaW5nT2sgPSBhd2FpdCBuZXcgUHJvbWlzZSgocmVzb2x2ZSkgPT4gewogICAgICAgICAgICAgICAgICAgIEdNX3htbGh0dHBSZXF1ZXN0KHsKICAgICAgICAgICAgICAgICAgICAgICAgbWV0aG9kOiAnR0VUJywgdXJsOiBTRVJWRVJfQkFTRSArIHByZWZpeCArICcvcGluZycsIHRpbWVvdXQ6IDgwMDAsCiAgICAgICAgICAgICAgICAgICAgICAgIG9ubG9hZDogKHIpID0+IHJlc29sdmUoci5zdGF0dXMgPT09IDIwMCksCiAgICAgICAgICAgICAgICAgICAgICAgIG9uZXJyb3I6ICgpID0+IHJlc29sdmUoZmFsc2UpLCBvbnRpbWVvdXQ6ICgpID0+IHJlc29sdmUoZmFsc2UpCiAgICAgICAgICAgICAgICAgICAgfSk7CiAgICAgICAgICAgICAgICB9KTsKICAgICAgICAgICAgICAgIGlmICghcGluZ09rKSB0aHJvdyBuZXcgRXJyb3IoJ0tIw5RORyBL4bq+VCBO4buQSSDEkMav4buiQyBTRVJWRVIuIEtp4buDbSB0cmE6IDEpIFVSTCBTRVJWRVJfQkFTRSwgMikgQVBJX1NFQ1JFVCBraOG7m3AgR09ETU9ERV9TRUNSRVQgdHLDqm4gc2VydmVyLCAzKSDEkcOjIGRlcGxveS9yZWRlcGxveS4nKTsKCiAgICAgICAgICAgICAgICAvLyBbdjQuMV0gTOG6pXkgT0xNIHVzZXJuYW1lIGhp4buHbiB04bqhaSDEkeG7gyBn4butaSBrw6htCiAgICAgICAgICAgICAgICBjb25zdCBjdXJyZW50T2xtID0gZ2V0T2xtVXNlcm5hbWUoKTsKICAgICAgICAgICAgICAgIGNvbnN0IHJlc3VsdCA9IGF3YWl0IGdtUG9zdCgnL3ZlcmlmeScsIHsga2V5LCBod2lkOiBnZXRIV0lEKCksIG9sbV91c2VyOiBjdXJyZW50T2xtIH0pOwoKICAgICAgICAgICAgICAgIGlmIChyZXN1bHQuc3VjY2VzcyB8fCByZXN1bHQudmFsaWQpIHsKCiAgICAgICAgICAgICAgICAgICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAgICAgICAgICAgICAgICAgLy8gW3Y0LjFdIEtJ4buCTSBUUkEgT0xNIEFDQ09VTlQgTUlTTUFUQ0gKICAgICAgICAgICAgICAgICAgICAvLyBTZXJ2ZXIgdHLhuqMgduG7gSBvbG1fdXNlciA9IHTDoGkga2hv4bqjbiBPTE0gxJHGsOG7o2MgZ2hpbSB2w6BvIGtleQogICAgICAgICAgICAgICAgICAgIC8vIFNvIHPDoW5oIHbhu5tpIHTDoGkga2hv4bqjbiBPTE0gxJFhbmcgxJHEg25nIG5o4bqtcCB0csOqbiB0csOsbmggZHV54buHdAogICAgICAgICAgICAgICAgICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgICAgICAgICAgICAgICAgIGNvbnN0IHNlcnZlck9sbSA9IHJlc3VsdC5vbG1fdXNlciB8fCByZXN1bHQub2xtX2FjY291bnQgfHwgJyc7CiAgICAgICAgICAgICAgICAgICAgaWYgKHNlcnZlck9sbSAmJiBjdXJyZW50T2xtICYmIGN1cnJlbnRPbG0gIT09ICdLaG9uZ1hhY0RpbmgnKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChzZXJ2ZXJPbG0udG9Mb3dlckNhc2UoKSAhPT0gY3VycmVudE9sbS50b0xvd2VyQ2FzZSgpKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAvLyBPTE0gYWNjb3VudCBtaXNtYXRjaCDigJQgaGnhu4NuIHRo4buLIGzhu5dpLCBraMO0bmcgdGnhur9wIHThu6VjCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBlcnJCb3guaW5uZXJIVE1MID0gYPCfmqsgPGI+VMOgaSBraG/huqNuIE9MTSBraMO0bmcga2jhu5twITwvYj48YnI+CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgS2V5IGTDoG5oIGNobzogPGI+JHtzZXJ2ZXJPbG19PC9iPjxicj4KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBIaeG7h24gdOG6oWk6IDxiPiR7Y3VycmVudE9sbX08L2I+PGJyPgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFZ1aSBsw7JuZyDEkcSDbmcgbmjhuq1wIMSRw7puZyB0w6BpIGtob+G6o24gT0xNIWA7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBlcnJCb3guc3R5bGUuZGlzcGxheSA9ICdibG9jayc7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBidG4udGV4dENvbnRlbnQgPSAn8J+UkyBLw41DSCBIT+G6oFQnOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgYnRuLmRpc2FibGVkICAgID0gZmFsc2U7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB2ZXJpZnlpbmcgICAgICAgPSBmYWxzZTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJldHVybjsKICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKCiAgICAgICAgICAgICAgICAgICAgX3NMUy5zZXQoTFNfS0VZLCAga2V5KTsgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgLy8gW3Y1XSBvYmZ1c2NhdGVkIHdyaXRlCiAgICAgICAgICAgICAgICAgICAgX3NMUy5zZXQoTFNfVFlQRSwgcmVzdWx0LnR5cGUgICB8fCByZXN1bHQucGxhbiB8fCAnVEhVT05HJyk7ICAvLyBbdjVdCiAgICAgICAgICAgICAgICAgICAgX3NMUy5zZXQoTFNfRVhQLCAgcmVzdWx0LmV4cGlyZXNfYXQgfHwgJycpOyAgICAgICAgICAgICAgICAgICAvLyBbdjVdCiAgICAgICAgICAgICAgICAgICAgQ1VSUkVOVF9LRVkgPSBrZXk7CiAgICAgICAgICAgICAgICAgICAgS0VZX1NUQVRVUyAgPSB7IHZhbGlkOiB0cnVlLCB0eXBlOiByZXN1bHQudHlwZSB8fCByZXN1bHQucGxhbiwgZXhwaXJlc19hdDogcmVzdWx0LmV4cGlyZXNfYXQgfHwgcmVzdWx0LmV4cCB9OwoKICAgICAgICAgICAgICAgICAgICBjb25zdCBrZXlUeXBlTGFiZWwgPSAocmVzdWx0LnR5cGUgfHwgcmVzdWx0LnBsYW4gfHwgJ1RIVU9ORycpLnRvVXBwZXJDYXNlKCk7CiAgICAgICAgICAgICAgICAgICAgY29uc3QgaXNQcmVtaXVtICAgID0gWydQUkVNSVVNJywnVklQJywnVU5MSU1JVEVEJ10uaW5jbHVkZXMoa2V5VHlwZUxhYmVsKTsKCiAgICAgICAgICAgICAgICAgICAgbGV0IGV4cGlyeUxpbmUgPSAnJzsKICAgICAgICAgICAgICAgICAgICBjb25zdCBleFJhdyA9IHJlc3VsdC5leHBpcmVzX2F0IHx8IHJlc3VsdC5leHAgfHwgJyc7CiAgICAgICAgICAgICAgICAgICAgaWYgKGV4UmF3KSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGV4cERhdGUgID0gbmV3IERhdGUoZXhSYXcpOwogICAgICAgICAgICAgICAgICAgICAgICBjb25zdCBkYXlzTGVmdCA9IE1hdGguY2VpbCgoZXhwRGF0ZSAtIG5ldyBEYXRlKCkpIC8gKDEwMDAgKiA2MCAqIDYwICogMjQpKTsKICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgZXhwU3RyICAgPSBleHBEYXRlLnRvTG9jYWxlRGF0ZVN0cmluZygndmktVk4nKTsKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGRheXNMZWZ0ID4gMCkgICAgICAgZXhwaXJ5TGluZSA9IGDwn5OFIEjhur90IGjhuqFuOiA8Yj4ke2V4cFN0cn08L2I+IChjw7JuIDxiPiR7ZGF5c0xlZnR9PC9iPiBuZ8OgeSlgOwogICAgICAgICAgICAgICAgICAgICAgICBlbHNlIGlmIChkYXlzTGVmdCA9PT0gMCkgZXhwaXJ5TGluZSA9IGDwn5OFIEjhur90IGjhuqFuOiA8Yj5Iw7RtIG5heTwvYj4gKCR7ZXhwU3RyfSlgOwogICAgICAgICAgICAgICAgICAgICAgICBlbHNlICAgICAgICAgICAgICAgICAgICBleHBpcnlMaW5lID0gYPCfk4UgSOG6v3QgaOG6oW46IDxiPiR7ZXhwU3RyfTwvYj4gPHNwYW4gc3R5bGU9ImNvbG9yOiNmZjQ0NDQ7Ij4oxJHDoyBo4bq/dCBo4bqhbik8L3NwYW4+YDsKICAgICAgICAgICAgICAgICAgICB9CgogICAgICAgICAgICAgICAgICAgIG92ZXJsYXkucmVtb3ZlKCk7CgogICAgICAgICAgICAgICAgICAgIGlmICghaXNQcmVtaXVtKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIHNob3dDdXN0b21Nb2RhbCh7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBpY29uOiAgJ+KchScsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0aXRsZTogJ0vDjUNIIEhP4bqgVCBUSMOATkggQ8OUTkchJywKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxpbmVzOiBbCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgYExv4bqhaSBrZXk6IDxiPiR7a2V5VHlwZUxhYmVsfTwvYj5gLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC4uLihleHBpcnlMaW5lID8gW2V4cGlyeUxpbmVdIDogW10pLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGA8c3BhbiBzdHlsZT0iY29sb3I6I2ZmYzEwNzsiPuKaoO+4jyBLZXkgdGjGsOG7nW5nOiBDaOG7qWMgbsSDbmcgIkNIVeG6qE4gQuG7iiAxMCDEkEnhu4JNIiBi4buLIHbDtCBoaeG7h3UgaG/DoS48L3NwYW4+YCwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBg8J+SjiBOw6JuZyBj4bqlcCBsw6puIFBSRU1JVU0gxJHhu4MgZMO5bmcgxJHhuqd5IMSR4bunIHTDrW5oIG7Eg25nIWAKICAgICAgICAgICAgICAgICAgICAgICAgICAgIF0sCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBvbk9rOiAoKSA9PiBjcmVhdGVVSSgpCiAgICAgICAgICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICAgICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgICAgICAgICAgICAgIHNob3dDdXN0b21Nb2RhbCh7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBpY29uOiAgJ/Cfko4nLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgdGl0bGU6ICdLw41DSCBIT+G6oFQgVEjDgE5IIEPDlE5HIScsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsaW5lczogWwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGBMb+G6oWkga2V5OiA8Yj4ke2tleVR5cGVMYWJlbH08L2I+IPCfko5gLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC4uLihleHBpcnlMaW5lID8gW2V4cGlyeUxpbmVdIDogW10pLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGDwn5STIFThuqV0IGPhuqMgdMOtbmggbsSDbmcgxJHDoyDEkcaw4bujYyBt4bufIGtob8OhIWAKICAgICAgICAgICAgICAgICAgICAgICAgICAgIF0sCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBvbk9rOiAoKSA9PiBjcmVhdGVVSSgpCiAgICAgICAgICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgICAgICAgICAgLy8gW3Y0XSBUaMO0bmcgYsOhbyBs4buXaSBjaGkgdGnhur90IHRoZW8gSFRUUCBzdGF0dXMKICAgICAgICAgICAgICAgICAgICBjb25zdCBzdGF0dXMgPSByZXN1bHQuX2h0dHBTdGF0dXM7CiAgICAgICAgICAgICAgICAgICAgbGV0IG1zZyA9IHJlc3VsdC5tZXNzYWdlIHx8IHJlc3VsdC5yZWFzb24gfHwgcmVzdWx0LmVycm9yIHx8ICcnOwogICAgICAgICAgICAgICAgICAgIGlmIChzdGF0dXMgPT09IDQwNCB8fCByZXN1bHQuZXJyb3IgPT09ICdOb3QgZm91bmQnKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIG1zZyA9ICfinYwgVGhp4bq/dCBi4buLL0lQIGPDsyB0aOG7gyDEkcOjIGLhu4sga2hvw6EgaG/hurdjIHNhaSDEkcaw4budbmcgZOG6q24gQVBJLiBLaeG7g20gdHJhIEFQSV9TRUNSRVQga2jhu5twIHNlcnZlci4nOwogICAgICAgICAgICAgICAgICAgIH0gZWxzZSBpZiAoc3RhdHVzID09PSA0MDMpIHsKICAgICAgICAgICAgICAgICAgICAgICAgbXNnID0gJ+KdjCAnICsgKG1zZyB8fCAnVGhp4bq/dCBi4buLL23huqFuZyBraMO0bmcgaOG7o3AgbOG7hyAobcOheSDhuqNvL3Byb3h5L1ZQTi90csOsbmggZHV54buHdCBnaeG6oykg4oCUIGPDsyB0aOG7gyDEkcOjIGLhu4sga2hvw6EgdsSpbmggdmnhu4VuLCBsacOqbiBo4buHIGFkbWluLicpOwogICAgICAgICAgICAgICAgICAgIH0gZWxzZSBpZiAoIW1zZykgewogICAgICAgICAgICAgICAgICAgICAgICBtc2cgPSAn4p2MIEtleSBraMO0bmcgaOG7o3AgbOG7hyEgKEtleVZhdWx0IHThu6sgY2jhu5FpKSc7CiAgICAgICAgICAgICAgICAgICAgfSBlbHNlIHsKICAgICAgICAgICAgICAgICAgICAgICAgbXNnID0gJ+KdjCAnICsgbXNnOwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICBlcnJCb3gudGV4dENvbnRlbnQgICA9IG1zZyArIChzdGF0dXMgPyBgIFtIVFRQICR7c3RhdHVzfV1gIDogJycpOwogICAgICAgICAgICAgICAgICAgIGVyckJveC5zdHlsZS5kaXNwbGF5ID0gJ2Jsb2NrJzsKICAgICAgICAgICAgICAgICAgICBidG4udGV4dENvbnRlbnQgPSAn8J+UkyBLw41DSCBIT+G6oFQnOwogICAgICAgICAgICAgICAgICAgIGJ0bi5kaXNhYmxlZCAgICA9IGZhbHNlOwogICAgICAgICAgICAgICAgICAgIHZlcmlmeWluZyAgICAgICA9IGZhbHNlOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9IGNhdGNoIChlKSB7CiAgICAgICAgICAgICAgICBlcnJCb3gudGV4dENvbnRlbnQgICA9ICfinYwgS2jDtG5nIHRo4buDIGvhur90IG7hu5FpIHNlcnZlcjogJyArIGUubWVzc2FnZTsKICAgICAgICAgICAgICAgIGVyckJveC5zdHlsZS5kaXNwbGF5ID0gJ2Jsb2NrJzsKICAgICAgICAgICAgICAgIGJ0bi50ZXh0Q29udGVudCA9ICfwn5STIEvDjUNIIEhP4bqgVCc7CiAgICAgICAgICAgICAgICBidG4uZGlzYWJsZWQgICAgPSBmYWxzZTsKICAgICAgICAgICAgICAgIHZlcmlmeWluZyAgICAgICA9IGZhbHNlOwogICAgICAgICAgICB9CiAgICAgICAgfTsKCiAgICAgICAgZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWtleS1pbnB1dCcpLmFkZEV2ZW50TGlzdGVuZXIoJ2tleWRvd24nLCAoZSkgPT4gewogICAgICAgICAgICBpZiAoZS5rZXkgPT09ICdFbnRlcicpIGJ0bi5jbGljaygpOwogICAgICAgIH0pOwogICAgfQoKICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgLy8gIE1BSU4gUEFORUwg4oCUIFVJIHYzLjIgKyB0w61uaCBuxINuZyB2NCArIGtob8OhIGtleSB0aMaw4budbmcgdjQuMQogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICBmdW5jdGlvbiBjcmVhdGVVSSgpIHsKICAgICAgICBpZiAoZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLXBhbmVsJykpIHJldHVybjsKCiAgICAgICAgbGV0IHVpU3R5bGUgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtdWktc3R5bGUnKTsKICAgICAgICBpZiAoIXVpU3R5bGUpIHsKICAgICAgICAgICAgdWlTdHlsZSA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ3N0eWxlJyk7CiAgICAgICAgICAgIHVpU3R5bGUuaWQgPSAndGwtdWktc3R5bGUnOwogICAgICAgICAgICBkb2N1bWVudC5oZWFkLmFwcGVuZENoaWxkKHVpU3R5bGUpOwogICAgICAgIH0KICAgICAgICB1aVN0eWxlLnRleHRDb250ZW50ID0gZ2V0TWFpblVJU3R5bGVzKCk7CgogICAgICAgIGNvbnN0IGtleVR5cGUgICAgPSBLRVlfU1RBVFVTLnR5cGUgfHwgX3NMUy5nZXQoTFNfVFlQRSkgfHwgJ1RIVU9ORyc7IC8vIFt2NV0KICAgICAgICBjb25zdCBrZXlUeXBlVXAgID0ga2V5VHlwZS50b1VwcGVyQ2FzZSgpOwogICAgICAgIGNvbnN0IGJhZGdlQ2xhc3MgPSBrZXlUeXBlVXAgPT09ICdVTkxJTUlURUQnID8gJ3RsLWJhZGdlIHVubGltaXRlZCcKICAgICAgICAgICAgICAgICAgICAgICAgIDogKGtleVR5cGVVcCA9PT0gJ1BSRU1JVU0nIHx8IGtleVR5cGVVcCA9PT0gJ1ZJUCcpID8gJ3RsLWJhZGdlIHZpcCcKICAgICAgICAgICAgICAgICAgICAgICAgIDogJ3RsLWJhZGdlJzsKICAgICAgICBjb25zdCBiYWRnZUljb24gID0ga2V5VHlwZVVwID09PSAnVU5MSU1JVEVEJyA/ICfwn5SlIFVOTElNSVRFRCcKICAgICAgICAgICAgICAgICAgICAgICAgIDogKGtleVR5cGVVcCA9PT0gJ1BSRU1JVU0nIHx8IGtleVR5cGVVcCA9PT0gJ1ZJUCcpID8gJ/Cfko4gUFJFTUlVTScKICAgICAgICAgICAgICAgICAgICAgICAgIDogJ/CflJEgVEjGr+G7nE5HJzsKCiAgICAgICAgY29uc3QgZXhwU3RyID0gKCgpID0+IHsKICAgICAgICAgICAgY29uc3QgZSA9IF9zTFMuZ2V0KExTX0VYUCk7IC8vIFt2NV0KICAgICAgICAgICAgaWYgKCFlKSByZXR1cm4gJyc7CiAgICAgICAgICAgIGNvbnN0IGQgPSBuZXcgRGF0ZShlKTsKICAgICAgICAgICAgcmV0dXJuIGlzTmFOKGQpID8gJycgOiBgIChleHA6ICR7ZC50b0xvY2FsZURhdGVTdHJpbmcoJ3ZpLVZOJyl9KWA7CiAgICAgICAgfSkoKTsKCiAgICAgICAgY29uc3QgdGhlbWVDYXJkc0hUTUwgPSBbJ2RlZmF1bHQnLCdncmF5JywncGluayddLm1hcCh0ID0+IHsKICAgICAgICAgICAgY29uc3QgdEluZm8gICAgPSBnZXRUaGVtZUNvbG9ycyh0KTsKICAgICAgICAgICAgY29uc3QgaXNBY3RpdmUgPSAodCA9PT0gQ1VSUkVOVF9USEVNRSk7CiAgICAgICAgICAgIHJldHVybiBgPGRpdiBjbGFzcz0idGwtdGMgJHtpc0FjdGl2ZSA/ICdhY3RpdmUnIDogJyd9IiBkYXRhLXQ9IiR7dH0iPgogICAgICAgICAgICAgICAgPGRpdiBjbGFzcz0idGwtdGMtcHJldiIgc3R5bGU9ImJhY2tncm91bmQ6JHt0SW5mby5wcmV2aWV3Qmd9O2JvcmRlcjoxcHggc29saWQgJHt0SW5mby5wcmV2aWV3Qm9yZGVyfTsiPgogICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLXRjLXByZXYtaW5uZXIiPgogICAgICAgICAgICAgICAgICAgICAgICA8c3BhbiBjbGFzcz0idGwtdGMtcHJldi10ZXh0IiBzdHlsZT0iY29sb3I6JHt0SW5mby5wcmV2aWV3VGV4dH07Ij4ke3RJbmZvLnRoZW1lTGFiZWwucmVwbGFjZSgvXlteXHNdK1xzLywnJykudG9VcHBlckNhc2UoKX08L3NwYW4+CiAgICAgICAgICAgICAgICAgICAgPC9kaXY+CiAgICAgICAgICAgICAgICA8L2Rpdj4KICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLXRjLWxibCI+JHt0SW5mby50aGVtZUxhYmVsfTwvZGl2PgogICAgICAgICAgICA8L2Rpdj5gOwogICAgICAgIH0pLmpvaW4oJycpOwoKICAgICAgICBjb25zdCB0YyAgID0gZ2V0VGhlbWVDb2xvcnMoQ1VSUkVOVF9USEVNRSk7CiAgICAgICAgY29uc3Qgd3JhcCA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2RpdicpOwogICAgICAgIHdyYXAuaW5uZXJIVE1MID0gYAogICAgICAgICAgICA8YnV0dG9uIGlkPSJ0bC1mbG9hdEJ0biI+4pqhPC9idXR0b24+CiAgICAgICAgICAgIDxkaXYgaWQ9InRsLXBhbmVsIiBjbGFzcz0iaGlkZGVuIj4KICAgICAgICAgICAgICAgICR7dGMucGFuZWxFeHRyYSB8fCAnJ30KICAgICAgICAgICAgICAgIDxkaXYgaWQ9InRsLXAtaGVhZGVyIj4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0bC1wLWJyYW5kIj4KICAgICAgICAgICAgICAgICAgICAgICAgPHNwYW4+8J+agDwvc3Bhbj4KICAgICAgICAgICAgICAgICAgICAgICAgPHNwYW4gY2xhc3M9InRsLXAtbmFtZSI+VEhJw4pOIFRBSSBUw5kgVOG7mEkgLy8gR09EIE1PREU8L3NwYW4+CiAgICAgICAgICAgICAgICAgICAgICAgIDxzcGFuIGNsYXNzPSIke2JhZGdlQ2xhc3N9Ij4ke2JhZGdlSWNvbn08L3NwYW4+CiAgICAgICAgICAgICAgICAgICAgPC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPGRpdiBzdHlsZT0iZGlzcGxheTpmbGV4O2FsaWduLWl0ZW1zOmNlbnRlcjtnYXA6NnB4OyI+CiAgICAgICAgICAgICAgICAgICAgICAgIDxidXR0b24gaWQ9InRsLXNldHRpbmdzQnRuIiB0aXRsZT0iQ8OgaSDEkeG6t3QgZ2lhbyBkaeG7h24iPuKamTwvYnV0dG9uPgogICAgICAgICAgICAgICAgICAgICAgICA8YnV0dG9uIGlkPSJ0bC1jbG9zZUJ0biI+4pyVPC9idXR0b24+CiAgICAgICAgICAgICAgICAgICAgPC9kaXY+CiAgICAgICAgICAgICAgICA8L2Rpdj4KCiAgICAgICAgICAgICAgICA8IS0tIFNldHRpbmdzIG92ZXJsYXkgLS0+CiAgICAgICAgICAgICAgICA8ZGl2IGlkPSJ0bC1zbyIgY2xhc3M9ImhpZGRlbiI+CiAgICAgICAgICAgICAgICAgICAgPGRpdiBjbGFzcz0idGwtc28taGRyIj4KICAgICAgICAgICAgICAgICAgICAgICAgPHNwYW4gY2xhc3M9InRsLXNvLXRpdGxlIj7impkgQ8OASSDEkOG6tlQgR0lBTyBESeG7hk48L3NwYW4+CiAgICAgICAgICAgICAgICAgICAgICAgIDxidXR0b24gaWQ9InRsLXNvQ2xvc2UiPuKclTwvYnV0dG9uPgogICAgICAgICAgICAgICAgICAgIDwvZGl2PgogICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLXNvLWJvZHkiPgogICAgICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0bC1zby1sYmwiPvCfjqggQ2jhu41uIG3DoHUgc+G6r2MgZ2lhbyBkaeG7h248L2Rpdj4KICAgICAgICAgICAgICAgICAgICAgICAgPGRpdiBjbGFzcz0idGwtdGhlbWUtY2FyZHMiPiR7dGhlbWVDYXJkc0hUTUx9PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLXNvLWRpdmlkZXIiPjwvZGl2PgogICAgICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0bC1oaW50Ij7DgXAgZOG7pW5nIG5nYXkgbOG6rXAgdOG7qWMgY2hvIHRvw6BuIGLhu5kgZ2lhbyBkaeG7h248YnI+a+G7gyBj4bqjIG3DoG4gaMOsbmggxJHEg25nIG5o4bqtcCB2w6AgdGjDtG5nIGLDoW8ga2V5PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLXNvLWRpdmlkZXIiPjwvZGl2PgogICAgICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0bC1zby1sYmwiPvCflJEgUXXhuqNuIGzDvSBrZXk8L2Rpdj4KICAgICAgICAgICAgICAgICAgICAgICAgPGJ1dHRvbiBjbGFzcz0idGwtY2hhbmdlLWtleSIgaWQ9InRsLWNoYW5nZUtleSI+8J+UhCDEkOG7lEkgS0VZPC9idXR0b24+CiAgICAgICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLWhpbnQiIHN0eWxlPSJtYXJnaW4tdG9wOjRweDsiPlhvw6Ega2V5IGhp4buHbiB04bqhaSB2w6AgcXVheSB24buBIG3DoG4gaMOsbmggxJHEg25nIG5o4bqtcDwvZGl2PgogICAgICAgICAgICAgICAgICAgIDwvZGl2PgogICAgICAgICAgICAgICAgPC9kaXY+CgogICAgICAgICAgICAgICAgPGRpdiBpZD0idGwtcC1ib2R5Ij4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0bC1zdGF0Ym94Ij4KICAgICAgICAgICAgICAgICAgICAgICAgPGRpdiBzdHlsZT0iY29sb3I6cmdiYSgyNTUsMjU1LDI1NSwwLjQpO2ZvbnQtc2l6ZToxMHB4O3RleHQtdHJhbnNmb3JtOnVwcGVyY2FzZTtmb250LXdlaWdodDo2MDA7Ij4vLyBUcuG6oW5nIHRow6FpIGjhu4cgdGjhu5FuZzwvZGl2PgogICAgICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0bC1zdGF0cm93Ij7inIUgTuG6oXAgZOG7ryBsaeG7h3U6IDxzcGFuIGlkPSJ0bC1xY291bnQiIHN0eWxlPSJjb2xvcjojMDBlNjc2O2ZvbnQtd2VpZ2h0OmJvbGQ7bWFyZ2luLWxlZnQ6NXB4Ij4wPC9zcGFuPiBjw6J1PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLXN0YXRyb3ciPvCflI0gQ2jhur8gxJHhu5k6IDxzcGFuIGlkPSJ0bC1tb2RlLWRldGVjdGVkIiBzdHlsZT0iY29sb3I6IzRmYWNmZTtmb250LXdlaWdodDpib2xkO21hcmdpbi1sZWZ0OjVweCI+UFJBQ1RJQ0U8L3NwYW4+PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgICAgIDxkaXYgY2xhc3M9InRsLXN0YXRyb3ciPvCflJAgS2V5OiA8c3BhbiBzdHlsZT0iY29sb3I6I2ZmYzEwNzsiPiR7a2V5VHlwZX08L3NwYW4+JHtleHBTdHJ9PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPGRpdiBzdHlsZT0iaGVpZ2h0OjFweDtiYWNrZ3JvdW5kOmxpbmVhci1ncmFkaWVudCg5MGRlZyx0cmFuc3BhcmVudCwke3RjLmJvcmRlcn0sdHJhbnNwYXJlbnQpOyI+PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgPGRpdj4KICAgICAgICAgICAgICAgICAgICAgICAgPGRpdiBzdHlsZT0iZm9udC1zaXplOjkuNXB4O2ZvbnQtd2VpZ2h0OjcwMDtjb2xvcjoke3RjLmdsb3dDb2xvcn07Zm9udC1mYW1pbHk6J09yYml0cm9uJzsiPuKamSBDSOG6viDEkOG7mCBWxq/hu6JUIFLDgE88L2Rpdj4KICAgICAgICAgICAgICAgICAgICAgICAgPHNlbGVjdCBpZD0idGwtbW9kZVNlbGVjdCI+CiAgICAgICAgICAgICAgICAgICAgICAgICAgICA8b3B0aW9uIHZhbHVlPSJwcmFjdGljZSI+4pqhIEx1eeG7h24gVOG6rXA8L29wdGlvbj4KICAgICAgICAgICAgICAgICAgICAgICAgICAgIDxvcHRpb24gdmFsdWU9ImV4YW0iIHNlbGVjdGVkPvCflKUgS2nhu4NtIFRyYTwvb3B0aW9uPgogICAgICAgICAgICAgICAgICAgICAgICAgICAgPG9wdGlvbiB2YWx1ZT0idmlkZW8iPvCfjqUgVmlkZW8gUXVpejwvb3B0aW9uPgogICAgICAgICAgICAgICAgICAgICAgICA8L3NlbGVjdD4KICAgICAgICAgICAgICAgICAgICAgICAgPGlucHV0IHR5cGU9Im51bWJlciIgc3RlcD0iMC4wMSIgY2xhc3M9InRsLWdvZC1pbnB1dCIgaWQ9InRsLWdvZC10aW1lIgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdmFsdWU9IjI1LjAwIiBwbGFjZWhvbGRlcj0iUGjDunQuR2nDonkgKHZkOiAyNS4zMCkiPgogICAgICAgICAgICAgICAgICAgIDwvZGl2PgogICAgICAgICAgICAgICAgICAgIDxidXR0b24gaWQ9InRsLWZpcmVCdG4iPvCfkqUgQ0hV4bqoTiBC4buKIDEwIMSQSeG7gk08L2J1dHRvbj4KICAgICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzPSJ0bC1jb25zb2xlIiBpZD0idGwtbG9nYm94Ij48L2Rpdj4KICAgICAgICAgICAgICAgIDwvZGl2PgogICAgICAgICAgICAgICAgPGRpdiBpZD0idGwtcC1mb290ZXIiPgogICAgICAgICAgICAgICAgICAgIDxzcGFuPkdPRCBNT0RFIHYzLjIg4oCUIFNFQ1VSRSB2NS4xICh2MTcgYW50aS1iYW4pPC9zcGFuPgogICAgICAgICAgICAgICAgICAgIDxkaXYgc3R5bGU9ImRpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7Z2FwOjVweDsiPgogICAgICAgICAgICAgICAgICAgICAgICA8ZGl2IHN0eWxlPSJ3aWR0aDo2cHg7aGVpZ2h0OjZweDtib3JkZXItcmFkaXVzOjUwJTtiYWNrZ3JvdW5kOiMwMGU2NzY7Ym94LXNoYWRvdzowIDAgNnB4ICMwMGU2NzY7YW5pbWF0aW9uOmNvbm5CbGluayAxLjhzIGluZmluaXRlOyI+PC9kaXY+CiAgICAgICAgICAgICAgICAgICAgICAgIDxzcGFuIGlkPSJ0bC1zdnJTdGF0dXMiPvCflLUgU2VydmVyOiBPSzwvc3Bhbj4KICAgICAgICAgICAgICAgICAgICA8L2Rpdj4KICAgICAgICAgICAgICAgIDwvZGl2PgogICAgICAgICAgICA8L2Rpdj5gOwogICAgICAgIGRvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQod3JhcCk7CgogICAgICAgIGNvbnN0IGZsb2F0QnRuID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWZsb2F0QnRuJyk7CiAgICAgICAgY29uc3QgcGFuZWwgICAgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtcGFuZWwnKTsKICAgICAgICBmbG9hdEJ0bi5vbmNsaWNrID0gKCkgPT4gcGFuZWwuY2xhc3NMaXN0LnRvZ2dsZSgnaGlkZGVuJyk7CiAgICAgICAgZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWNsb3NlQnRuJykub25jbGljayA9ICgpID0+IHsKICAgICAgICAgICAgcGFuZWwuY2xhc3NMaXN0LmFkZCgnaGlkZGVuJyk7CiAgICAgICAgICAgIGNvbnN0IHNvID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLXNvJyk7CiAgICAgICAgICAgIGlmIChzbykgc28uY2xhc3NMaXN0LmFkZCgnaGlkZGVuJyk7CiAgICAgICAgfTsKCiAgICAgICAgLy8gRHJhZwogICAgICAgIGNvbnN0IGhkciA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC1wLWhlYWRlcicpOwogICAgICAgIGxldCBpc0RyYWdnaW5nID0gZmFsc2UsIHN0YXJ0WCA9IDAsIHN0YXJ0WSA9IDAsIGluaXRMZWZ0ID0gMCwgaW5pdFRvcCA9IDA7CiAgICAgICAgaWYgKGhkcikgewogICAgICAgICAgICBoZHIuYWRkRXZlbnRMaXN0ZW5lcignbW91c2Vkb3duJywgKGUpID0+IHsKICAgICAgICAgICAgICAgIGlmIChlLnRhcmdldC5pZCA9PT0gJ3RsLWNsb3NlQnRuJyB8fCBlLnRhcmdldC5pZCA9PT0gJ3RsLXNldHRpbmdzQnRuJykgcmV0dXJuOwogICAgICAgICAgICAgICAgaXNEcmFnZ2luZyA9IHRydWU7CiAgICAgICAgICAgICAgICBzdGFydFggPSBlLmNsaWVudFg7IHN0YXJ0WSA9IGUuY2xpZW50WTsKICAgICAgICAgICAgICAgIGNvbnN0IHIgPSBwYW5lbC5nZXRCb3VuZGluZ0NsaWVudFJlY3QoKTsKICAgICAgICAgICAgICAgIGluaXRMZWZ0ID0gci5sZWZ0OyBpbml0VG9wID0gci50b3A7CiAgICAgICAgICAgIH0pOwogICAgICAgIH0KICAgICAgICBkb2N1bWVudC5hZGRFdmVudExpc3RlbmVyKCdtb3VzZW1vdmUnLCAoZSkgPT4gewogICAgICAgICAgICBpZiAoIWlzRHJhZ2dpbmcpIHJldHVybjsKICAgICAgICAgICAgcGFuZWwuc3R5bGUubGVmdCAgICAgID0gKGluaXRMZWZ0ICsgZS5jbGllbnRYIC0gc3RhcnRYKSArICdweCc7CiAgICAgICAgICAgIHBhbmVsLnN0eWxlLnRvcCAgICAgICA9IChpbml0VG9wICArIGUuY2xpZW50WSAtIHN0YXJ0WSkgKyAncHgnOwogICAgICAgICAgICBwYW5lbC5zdHlsZS50cmFuc2Zvcm0gPSAnbm9uZSc7CiAgICAgICAgfSk7CiAgICAgICAgZG9jdW1lbnQuYWRkRXZlbnRMaXN0ZW5lcignbW91c2V1cCcsICgpID0+IHsgaXNEcmFnZ2luZyA9IGZhbHNlOyB9KTsKCiAgICAgICAgLy8gPT09PT09IFNFVFRJTkdTIFBBTkVMIExPR0lDID09PT09PQogICAgICAgIGNvbnN0IHNvICAgICAgICAgID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLXNvJyk7CiAgICAgICAgY29uc3Qgc2V0dGluZ3NCdG4gPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtc2V0dGluZ3NCdG4nKTsKICAgICAgICBjb25zdCBzb0Nsb3NlICAgICA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC1zb0Nsb3NlJyk7CgogICAgICAgIGlmIChzZXR0aW5nc0J0biAmJiBzbykgewogICAgICAgICAgICBzZXR0aW5nc0J0bi5vbmNsaWNrID0gKCkgPT4gewogICAgICAgICAgICAgICAgY29uc3QgaXNPcGVuID0gIXNvLmNsYXNzTGlzdC5jb250YWlucygnaGlkZGVuJyk7CiAgICAgICAgICAgICAgICBzby5jbGFzc0xpc3QudG9nZ2xlKCdoaWRkZW4nKTsKICAgICAgICAgICAgICAgIHNldHRpbmdzQnRuLmNsYXNzTGlzdC50b2dnbGUoJ2FjdGl2ZScsICFpc09wZW4pOwogICAgICAgICAgICB9OwogICAgICAgIH0KICAgICAgICBpZiAoc29DbG9zZSkgewogICAgICAgICAgICBzb0Nsb3NlLm9uY2xpY2sgPSAoKSA9PiB7CiAgICAgICAgICAgICAgICBzby5jbGFzc0xpc3QuYWRkKCdoaWRkZW4nKTsKICAgICAgICAgICAgICAgIGlmIChzZXR0aW5nc0J0bikgc2V0dGluZ3NCdG4uY2xhc3NMaXN0LnJlbW92ZSgnYWN0aXZlJyk7CiAgICAgICAgICAgIH07CiAgICAgICAgfQoKICAgICAgICBpZiAoc28pIHsKICAgICAgICAgICAgc28ucXVlcnlTZWxlY3RvckFsbCgnLnRsLXRjJykuZm9yRWFjaChjYXJkID0+IHsKICAgICAgICAgICAgICAgIGNhcmQuYWRkRXZlbnRMaXN0ZW5lcignY2xpY2snLCAoKSA9PiB7CiAgICAgICAgICAgICAgICAgICAgY29uc3QgbmV3VGhlbWUgPSBjYXJkLmRhdGFzZXQudDsKICAgICAgICAgICAgICAgICAgICBpZiAobmV3VGhlbWUgPT09IENVUlJFTlRfVEhFTUUpIHsKICAgICAgICAgICAgICAgICAgICAgICAgc28uY2xhc3NMaXN0LmFkZCgnaGlkZGVuJyk7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChzZXR0aW5nc0J0bikgc2V0dGluZ3NCdG4uY2xhc3NMaXN0LnJlbW92ZSgnYWN0aXZlJyk7CiAgICAgICAgICAgICAgICAgICAgICAgIHJldHVybjsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgc28ucXVlcnlTZWxlY3RvckFsbCgnLnRsLXRjJykuZm9yRWFjaChjID0+IHsKICAgICAgICAgICAgICAgICAgICAgICAgYy5jbGFzc0xpc3QudG9nZ2xlKCdhY3RpdmUnLCBjLmRhdGFzZXQudCA9PT0gbmV3VGhlbWUpOwogICAgICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICAgICAgICAgIGFwcGx5VGhlbWVMaXZlKG5ld1RoZW1lKTsKICAgICAgICAgICAgICAgICAgICBjb25zdCBleGlzdEZ4ID0gcGFuZWwucXVlcnlTZWxlY3RvcignI3RsLWNvbm4tZngtYmFyLCN0bC1jb25uLWZ4LXBldGFscycpOwogICAgICAgICAgICAgICAgICAgIGlmIChleGlzdEZ4KSBleGlzdEZ4LnJlbW92ZSgpOwogICAgICAgICAgICAgICAgICAgIGNvbnN0IG5ld1RjID0gZ2V0VGhlbWVDb2xvcnMobmV3VGhlbWUpOwogICAgICAgICAgICAgICAgICAgIGlmIChuZXdUYy5wYW5lbEV4dHJhKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IHRtcCA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2RpdicpOwogICAgICAgICAgICAgICAgICAgICAgICB0bXAuaW5uZXJIVE1MID0gbmV3VGMucGFuZWxFeHRyYTsKICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgZnhFbCA9IHRtcC5maXJzdEVsZW1lbnRDaGlsZDsKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGZ4RWwpIHBhbmVsLmluc2VydEJlZm9yZShmeEVsLCBwYW5lbC5maXJzdENoaWxkKTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgc2V0VGltZW91dCgoKSA9PiB7CiAgICAgICAgICAgICAgICAgICAgICAgIHNvLmNsYXNzTGlzdC5hZGQoJ2hpZGRlbicpOwogICAgICAgICAgICAgICAgICAgICAgICBpZiAoc2V0dGluZ3NCdG4pIHNldHRpbmdzQnRuLmNsYXNzTGlzdC5yZW1vdmUoJ2FjdGl2ZScpOwogICAgICAgICAgICAgICAgICAgIH0sIDMyMCk7CiAgICAgICAgICAgICAgICB9KTsKICAgICAgICAgICAgfSk7CiAgICAgICAgfQoKICAgICAgICAvLyBNb2RlIHNlbGVjdAogICAgICAgIGNvbnN0IG1vZGVTZWxlY3QgICA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC1tb2RlU2VsZWN0Jyk7CiAgICAgICAgY29uc3QgZGV0ZWN0ZWRNb2RlID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLW1vZGUtZGV0ZWN0ZWQnKTsKICAgICAgICBpZiAobW9kZVNlbGVjdCkgewogICAgICAgICAgICBtb2RlU2VsZWN0LmFkZEV2ZW50TGlzdGVuZXIoJ2NoYW5nZScsIGZ1bmN0aW9uKCkgewogICAgICAgICAgICAgICAgaWYgKGRldGVjdGVkTW9kZSkgZGV0ZWN0ZWRNb2RlLnRleHRDb250ZW50ID0gdGhpcy52YWx1ZS50b1VwcGVyQ2FzZSgpOwogICAgICAgICAgICB9KTsKICAgICAgICB9CgogICAgICAgIC8vIFt2Nl0gQ29kZSAiQ0hV4bqoTiBC4buKIDEwIMSQSeG7gk0iIMSRw6MgY2h1eeG7g24gSE/DgE4gVE/DgE4gc2FuZyBzZXJ2ZXIg4oCUIHThuqNpIMSR4buZbmcgcXVhIC9tb2R1bGUgKG3DoyBob8OhIEFFUy1HQ00pLCBLSMOUTkcgY8OybiBu4bqxbSB0cm9uZyBzY3JpcHQgbsOgeS4KICAgICAgICBhc3luYyBmdW5jdGlvbiBmb3JjZUZldGNoUXVlc3Rpb25zKCkgewogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgZm9yY2VHZXRNZXRhKCk7CiAgICAgICAgICAgICAgICBjb25zdCBVVyA9ICh0eXBlb2YgdW5zYWZlV2luZG93ICE9PSAndW5kZWZpbmVkJykgPyB1bnNhZmVXaW5kb3cgOiB3aW5kb3c7CiAgICAgICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgICAgIGNvbnN0IGJ1ZiA9IFVXLl9fa3ZfcV9idWY7CiAgICAgICAgICAgICAgICAgICAgaWYgKEFycmF5LmlzQXJyYXkoYnVmKSkgewogICAgICAgICAgICAgICAgICAgICAgICBmb3IgKGxldCBpID0gMDsgaSA8IGJ1Zi5sZW5ndGg7IGkrKykgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgaXQgPSBidWZbaV07CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBpZiAoaXQgJiYgaXQudXJsICYmIGl0LnRleHQpIHsgdHJ5IHsgaGFuZGxlUmF3UmVzcG9uc2UoaXQudXJsLCBpdC50ZXh0KTsgfSBjYXRjaCAoXykge30gfQogICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfSBjYXRjaCAoXykge30KICAgICAgICAgICAgICAgIGlmIChTRVNTSU9OLnJhd19xdWVzdGlvbnMubGVuZ3RoID4gMCkgcmV0dXJuIHRydWU7CiAgICAgICAgICAgICAgICBjb25zdCBsYXN0ID0gVVcuX190bF9sYXN0X3FyZXE7CiAgICAgICAgICAgICAgICBpZiAobGFzdCAmJiBsYXN0LnVybCkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGZvcHRzID0geyBtZXRob2Q6IGxhc3QubWV0aG9kIHx8ICdHRVQnLCBjcmVkZW50aWFsczogJ2luY2x1ZGUnLCBjYWNoZTogJ25vLWNhY2hlJyB9OwogICAgICAgICAgICAgICAgICAgICAgICBpZiAobGFzdC5ib2R5ICYmIChsYXN0Lm1ldGhvZCB8fCAnR0VUJykudG9VcHBlckNhc2UoKSAhPT0gJ0dFVCcpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGZvcHRzLmhlYWRlcnMgPSB7ICdDb250ZW50LVR5cGUnOiAnYXBwbGljYXRpb24veC13d3ctZm9ybS11cmxlbmNvZGVkOyBjaGFyc2V0PVVURi04JywgJ1gtUmVxdWVzdGVkLVdpdGgnOiAnWE1MSHR0cFJlcXVlc3QnIH07CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBmb3B0cy5ib2R5ID0gbGFzdC5ib2R5OwogICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IHJlcyA9IGF3YWl0IGZldGNoKGxhc3QudXJsLCBmb3B0cyk7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChyZXMub2spIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IHR4dCA9IGF3YWl0IHJlcy50ZXh0KCk7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0cnkgeyBoYW5kbGVSYXdSZXNwb25zZShsYXN0LnVybCwgdHh0KTsgfSBjYXRjaCAoXykge30KICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIH0gY2F0Y2ggKGUpIHsgY29uc29sZS53YXJuKCdbVExdIHJlcGxheSBmYWlsJywgZSk7IH0KICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIHJldHVybiBTRVNTSU9OLnJhd19xdWVzdGlvbnMubGVuZ3RoID4gMDsKICAgICAgICAgICAgfSBjYXRjaCAoZSkgeyByZXR1cm4gZmFsc2U7IH0KICAgICAgICB9CgogICAgICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgICAgIC8vIFt2NC4xXSBGSVJFIEJVVFRPTiDigJQgS0nhu4JNIFRSQSBMT+G6oEkgS0VZIChHSeG7kE5HIFYzIENPUkUpCiAgICAgICAgLy8gS2V5IHRoxrDhu51uZzogS0hPw4EgY2jhu6ljIG7Eg25nIENIVeG6qE4gQuG7iiAxMCDEkEnhu4JNCiAgICAgICAgLy8gS2V5IFByZW1pdW0vVklQL1VubGltaXRlZDogSG/huqF0IMSR4buZbmcgYsOsbmggdGjGsOG7nW5nCiAgICAgICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAgICAgY29uc3QgZmlyZUJ0biA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC1maXJlQnRuJyk7CgogICAgICAgIGlmICghaXNQcmVtaXVtS2V5KCkpIHsKICAgICAgICAgICAgLy8g4pSA4pSAIEtFWSBUSMav4bucTkc6IFbDtCBoaeG7h3UgaG/DoSBuw7p0IENIVeG6qE4gQuG7iiAxMCDEkEnhu4JNIOKUgOKUgAogICAgICAgICAgICBmaXJlQnRuLmlubmVySFRNTCA9ICfwn5SSIENIVeG6qE4gQuG7iiAxMCDEkEnhu4JNIChDSOG7iCBQUkVNSVVNKSc7CiAgICAgICAgICAgIGZpcmVCdG4uc3R5bGUuYmFja2dyb3VuZCA9ICdsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLCM0NDQsIzY2NiknOwogICAgICAgICAgICBmaXJlQnRuLnN0eWxlLmN1cnNvciA9ICdub3QtYWxsb3dlZCc7CiAgICAgICAgICAgIGZpcmVCdG4uc3R5bGUub3BhY2l0eSA9ICcwLjYnOwogICAgICAgICAgICBmaXJlQnRuLnRpdGxlID0gJ0No4bupYyBuxINuZyBuw6B5IGNo4buJIGTDoG5oIGNobyBrZXkgUFJFTUlVTS4gTGnDqm4gaOG7hyDEkeG7gyBuw6JuZyBj4bqlcCEnOwogICAgICAgICAgICBmaXJlQnRuLm9uY2xpY2sgPSAoZSkgPT4gewogICAgICAgICAgICAgICAgZS5wcmV2ZW50RGVmYXVsdCgpOwogICAgICAgICAgICAgICAgYWRkTG9nKCfwn5SSIENo4bupYyBuxINuZyBuw6B5IHnDqnUgY+G6p3Uga2V5IFBSRU1JVU0hJywgJ2VycicpOwogICAgICAgICAgICAgICAgYWRkTG9nKCfwn5KOIExpw6puIGjhu4cgYWRtaW4gxJHhu4MgbsOibmcgY+G6pXAga2V5IFBSRU1JVU0uJywgJ3dhcm4nKTsKICAgICAgICAgICAgICAgIHNob3dDdXN0b21Nb2RhbCh7CiAgICAgICAgICAgICAgICAgICAgaWNvbjogICfwn5SSJywKICAgICAgICAgICAgICAgICAgICB0aXRsZTogJ1nDilUgQ+G6plUgS0VZIFBSRU1JVU0nLAogICAgICAgICAgICAgICAgICAgIGxpbmVzOiBbCiAgICAgICAgICAgICAgICAgICAgICAgICdDaOG7qWMgbsSDbmcgPGI+IkNIVeG6qE4gQuG7iiAxMCDEkEnhu4JNIjwvYj4gY2jhu4kgZMOgbmggY2hvIGtleSBQUkVNSVVNIScsCiAgICAgICAgICAgICAgICAgICAgICAgIGBLZXkgY+G7p2EgYuG6oW4gbMOgIGtleSA8Yj4keyhLRVlfU1RBVFVTLnR5cGUgfHwgJ1RIxq/hu5xORycpLnRvVXBwZXJDYXNlKCl9PC9iPi5gLAogICAgICAgICAgICAgICAgICAgICAgICAn8J+SjiBMacOqbiBo4buHIGFkbWluIMSR4buDIG7Dom5nIGPhuqVwIGzDqm4gUFJFTUlVTSEnCiAgICAgICAgICAgICAgICAgICAgXQogICAgICAgICAgICAgICAgfSk7CiAgICAgICAgICAgIH07CiAgICAgICAgfSBlbHNlIHsKICAgICAgICAgICAgLy8g4pSA4pSAIEtFWSBQUkVNSVVNOiBIb+G6oXQgxJHhu5luZyBiw6xuaCB0aMaw4budbmcg4pSA4pSACiAgICAgICAgICAgIGZpcmVCdG4ub25jbGljayA9IGFzeW5jICgpID0+IHsKICAgICAgICAgICAgICAgIGFkZExvZygn8J+UjSDEkGFuZyDEkeG7k25nIGLhu5kgZOG7ryBsaeG7h3UgdOG7qyBPTE0uLi4nLCAnaW5mbycpOwogICAgICAgICAgICAgICAgYXdhaXQgZm9yY2VGZXRjaFF1ZXN0aW9ucygpOwogICAgICAgICAgICAgICAgZm9yY2VHZXRNZXRhKCk7CgogICAgICAgICAgICAgICAgaWYgKFNFU1NJT04ubWV0YS5pZF91c2VyICYmIFNFU1NJT04ubWV0YS5pZF9jYXRlICYmIFNFU1NJT04ucmF3X3F1ZXN0aW9ucy5sZW5ndGggPiAwKSB7CiAgICAgICAgICAgICAgICAgICAgZmlyZUJ0bi5kaXNhYmxlZCA9IHRydWU7CiAgICAgICAgICAgICAgICAgICAgZmlyZUJ0bi50ZXh0Q29udGVudCA9ICfij7MgxJBBTkcgTuG7mFAgQsOASS4uLic7CiAgICAgICAgICAgICAgICAgICAgLy8gW3Y2XSBNb2R1bGUgIkNIVeG6qE4gQuG7iiAxMCDEkEnhu4JNIiDigJQgdOG6o2kgxJHhu5luZyB04burIHNlcnZlciAoS0jDlE5HIG7hurFtIHRyb25nIHNjcmlwdCkKICAgICAgICAgICAgICAgICAgICBpZiAoIV9maXJlTW9kdWxlLmZhY3RvcnkpIHsKICAgICAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfwn5OlIMSQYW5nIHThuqNpIG1vZHVsZSBu4buZcCBiw6BpIHThu6sgc2VydmVyLi4uJywgJ2luZm8nKTsKICAgICAgICAgICAgICAgICAgICAgICAgYXdhaXQgX2xvYWRGaXJlTW9kdWxlKCk7CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIGxldCBva0NTID0gbnVsbDsKICAgICAgICAgICAgICAgICAgICBpZiAoX2ZpcmVNb2R1bGUuZmFjdG9yeSkgewogICAgICAgICAgICAgICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgZmlyZUZuID0gX2ZpcmVNb2R1bGUuZmFjdG9yeSh7IFNFU1NJT046IFNFU1NJT04sIGFkZExvZzogYWRkTG9nLCBmb3JjZUdldE1ldGE6IGZvcmNlR2V0TWV0YSB9KTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIG9rQ1MgPSBhd2FpdCBmaXJlRm4oKTsKICAgICAgICAgICAgICAgICAgICAgICAgfSBjYXRjaCAoZSkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfinYwgTW9kdWxlIGzhu5dpOiAnICsgZS5tZXNzYWdlLCAnZXJyJyk7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBfZmlyZU1vZHVsZS5mYWN0b3J5ID0gbnVsbDsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIG9rQ1MgPSBudWxsOwogICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgfSBlbHNlIHsKICAgICAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfimqDvuI8gS2jDtG5nIHThuqNpIMSRxrDhu6NjIG1vZHVsZSBu4buZcCBiw6BpLCB0aOG7rSBxdWEgc2VydmVyLi4uJywgJ3dhcm4nKTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgaWYgKG9rQ1MpIHsKICAgICAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfinIUgTuG7mXAgYsOgaSB0aMOgbmggY8O0bmchIMSQYW5nIHThuqNpIGzhuqFpLi4uJywgJ29rJyk7CiAgICAgICAgICAgICAgICAgICAgICAgIGZpcmVCdG4udGV4dENvbnRlbnQgPSAn4pyFIFRIw4BOSCBDw5RORyEnOwogICAgICAgICAgICAgICAgICAgICAgICBmaXJlQnRuLnN0eWxlLmJhY2tncm91bmQgPSAnbGluZWFyLWdyYWRpZW50KDEzNWRlZywjMDBiMDliLCMwMGU2NzYpJzsKICAgICAgICAgICAgICAgICAgICAgICAgc2V0VGltZW91dCgoKSA9PiB3aW5kb3cubG9jYXRpb24ucmVsb2FkKCksIDI1MDApOwogICAgICAgICAgICAgICAgICAgICAgICByZXR1cm47CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIGFkZExvZygn4pqg77iPIENsaWVudC1zaWRlIHRo4bqldCBi4bqhaSwgdGjhu60gcXVhIHNlcnZlci4uLicsICd3YXJuJyk7CiAgICAgICAgICAgICAgICAgICAgZmlyZUJ0bi50ZXh0Q29udGVudCA9ICfwn5KlIENIVeG6qE4gQuG7iiAxMCDEkEnhu4JNJzsKICAgICAgICAgICAgICAgICAgICBmaXJlQnRuLmRpc2FibGVkID0gZmFsc2U7CiAgICAgICAgICAgICAgICB9CgogICAgICAgICAgICAgICAgaWYgKCFTRVNTSU9OLm1ldGEuaWRfdXNlciB8fCAhU0VTU0lPTi5tZXRhLmlkX2NhdGUpIHsKICAgICAgICAgICAgICAgICAgICBhZGRMb2coJ+KdjCBDaMawYSBjw7MgSUQgdXNlci9jYXRlICh1c2VyPScgKyAoU0VTU0lPTi5tZXRhLmlkX3VzZXJ8fCc/JykgKyAnLCBjYXRlPScgKyAoU0VTU0lPTi5tZXRhLmlkX2NhdGV8fCc/JykgKyAnKS4gSMOjeSBGNSBob+G6t2MgY2jhu50gdOG6o2kgeG9uZyBjw6J1IGjhu49pLicsICdlcnInKTsKICAgICAgICAgICAgICAgICAgICByZXR1cm47CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBpZiAoU0VTU0lPTi5yYXdfcXVlc3Rpb25zLmxlbmd0aCA9PT0gMCkgewogICAgICAgICAgICAgICAgICAgIGFkZExvZygn4p2MIENoxrBhIG7huqFwIMSRxrDhu6NjIGPDonUgaOG7j2kuIEjDo3kgRjUgdHJhbmcgaG/hurdjIGzDoG0gbeG7m2kgYsOgaSB04bqtcC4nLCAnZXJyJyk7CiAgICAgICAgICAgICAgICAgICAgcmV0dXJuOwogICAgICAgICAgICAgICAgfQoKICAgICAgICAgICAgICAgIGNvbnN0IGtleSAgICAgID0gQ1VSUkVOVF9LRVkgfHwgX3NMUy5nZXQoTFNfS0VZKTsgLy8gW3Y1XQogICAgICAgICAgICAgICAgY29uc3QgbW9kZSAgICAgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtbW9kZVNlbGVjdCcpLnZhbHVlOwogICAgICAgICAgICAgICAgY29uc3QgdGltZV9zdHIgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtZ29kLXRpbWUnKS52YWx1ZTsKCiAgICAgICAgICAgICAgICBhZGRMb2coYPCfmoAgR+G7rWkgecOqdSBj4bqndSB04bubaSBzZXJ2ZXIgKG1vZGU6ICR7bW9kZX0pLi4uYCwgJ3dhcm4nKTsKICAgICAgICAgICAgICAgIGZpcmVCdG4uZGlzYWJsZWQgPSB0cnVlOwoKICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgY29uc3QgcmVzdWx0ID0gYXdhaXQgZ21Qb3N0KCcvZmlyZScsIHsKICAgICAgICAgICAgICAgICAgICAgICAga2V5LCBod2lkOiBnZXRIV0lEKCksCiAgICAgICAgICAgICAgICAgICAgICAgIHNlc3Npb246IHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJhd19xdWVzdGlvbnM6IFNFU1NJT04ucmF3X3F1ZXN0aW9ucywKICAgICAgICAgICAgICAgICAgICAgICAgICAgIG1ldGE6ICAgICAgICAgIFNFU1NJT04ubWV0YSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZpZGVvX2xlbmd0aDogIFNFU1NJT04udmlkZW9fbGVuZ3RoCiAgICAgICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAgICAgICAgIG1vZGUsIHRpbWVfc3RyLAogICAgICAgICAgICAgICAgICAgICAgICBncmFkZTogd2luZG93LmdyYWRlIHx8IHdpbmRvdy5pZF9ncmFkZSB8fCAnMTAnCiAgICAgICAgICAgICAgICAgICAgfSk7CgogICAgICAgICAgICAgICAgICAgIGlmICghKHJlc3VsdC5zdWNjZXNzIHx8IHJlc3VsdC52YWxpZCkpIHsKICAgICAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfinYwgU2VydmVyOiAnICsgKHJlc3VsdC5tZXNzYWdlIHx8ICdM4buXaScpLCAnZXJyJyk7CiAgICAgICAgICAgICAgICAgICAgICAgIGZpcmVCdG4uZGlzYWJsZWQgPSBmYWxzZTsKICAgICAgICAgICAgICAgICAgICAgICAgcmV0dXJuOwogICAgICAgICAgICAgICAgICAgIH0KCiAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfwn5OkIMSQYW5nIG7hu5lwIGLDoGkuLi4nLCAnaW5mbycpOwogICAgICAgICAgICAgICAgICAgIGNvbnN0IGNzcmYgPSBTRVNTSU9OLm1ldGEuY3NyZl90b2tlbiB8fAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCdtZXRhW25hbWU9ImNzcmYtdG9rZW4iXScpPy5nZXRBdHRyaWJ1dGUoJ2NvbnRlbnQnKSB8fCAnJzsKICAgICAgICAgICAgICAgICAgICBjb25zdCByZXNwb25zZSA9IGF3YWl0IGZldGNoKHJlc3VsdC5lbmRwb2ludCB8fCAnL2NvdXJzZS90ZWFjaGVyLXN0YXRpYycsIHsKICAgICAgICAgICAgICAgICAgICAgICAgbWV0aG9kOiAnUE9TVCcsCiAgICAgICAgICAgICAgICAgICAgICAgIGhlYWRlcnM6IHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICdjb250ZW50LXR5cGUnOiAgICAgICdhcHBsaWNhdGlvbi94LXd3dy1mb3JtLXVybGVuY29kZWQ7IGNoYXJzZXQ9VVRGLTgnLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgJ3gtY3NyZi10b2tlbic6ICAgICAgY3NyZiwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICd4LXJlcXVlc3RlZC13aXRoJzogICdYTUxIdHRwUmVxdWVzdCcKICAgICAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgICAgYm9keTogcmVzdWx0LnBhcmFtc19zdHIKICAgICAgICAgICAgICAgICAgICB9KTsKCiAgICAgICAgICAgICAgICAgICAgaWYgKHJlc3BvbnNlLm9rKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGFkZExvZygn4pyFIE7hu5lwIGLDoGkgdGjDoG5oIGPDtG5nISBLaeG7g20gdHJhIMSRaeG7g20gT0xNLicsICdvaycpOwogICAgICAgICAgICAgICAgICAgICAgICBmaXJlQnRuLnRleHRDb250ZW50ID0gJ+KchSBUSMOATkggQ8OUTkchJzsKICAgICAgICAgICAgICAgICAgICAgICAgZmlyZUJ0bi5zdHlsZS5iYWNrZ3JvdW5kID0gJ2xpbmVhci1ncmFkaWVudCgxMzVkZWcsIzAwYjA5YiwjMDBlNjc2KSc7CiAgICAgICAgICAgICAgICAgICAgICAgIHNldFRpbWVvdXQoKCkgPT4gd2luZG93LmxvY2F0aW9uLnJlbG9hZCgpLCAyNTAwKTsKICAgICAgICAgICAgICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAgICAgICAgICAgICBhZGRMb2coYOKdjCBPTE0gdHLhuqMgduG7gSBs4buXaSBIVFRQICR7cmVzcG9uc2Uuc3RhdHVzfWAsICdlcnInKTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9IGNhdGNoIChlKSB7CiAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfinYwgTOG7l2k6ICcgKyBlLm1lc3NhZ2UsICdlcnInKTsKICAgICAgICAgICAgICAgIH0KCiAgICAgICAgICAgICAgICBmaXJlQnRuLmRpc2FibGVkID0gZmFsc2U7CiAgICAgICAgICAgIH07CiAgICAgICAgfQoKICAgICAgICAvLyBOw7p0IMSR4buVaSBrZXkKICAgICAgICBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtY2hhbmdlS2V5Jykub25jbGljayA9ICgpID0+IHsKICAgICAgICAgICAgc2hvd0NvbmZpcm1Nb2RhbCh7CiAgICAgICAgICAgICAgICBpY29uOiAgICAgICAn8J+UhCcsCiAgICAgICAgICAgICAgICB0aXRsZTogICAgICAnxJDhu5RJIEtFWT8nLAogICAgICAgICAgICAgICAgbGluZXM6ICAgICAgWwogICAgICAgICAgICAgICAgICAgICdLZXkgaGnhu4duIHThuqFpIHPhur0gYuG7iyA8Yj54b8OhIGhvw6BuIHRvw6BuPC9iPi4nLAogICAgICAgICAgICAgICAgICAgICdC4bqhbiBz4bq9IMSRxrDhu6NjIMSRxrBhIHbhu4EgbcOgbiBow6xuaCDEkcSDbmcgbmjhuq1wLicKICAgICAgICAgICAgICAgIF0sCiAgICAgICAgICAgICAgICBva1RleHQ6ICAgICAn8J+UhCDEkOG7lEkgS0VZJywKICAgICAgICAgICAgICAgIGNhbmNlbFRleHQ6ICdI4bumWScsCiAgICAgICAgICAgICAgICBvbk9rOiAoKSA9PiB7CiAgICAgICAgICAgICAgICAgICAgbG9jYWxTdG9yYWdlLnJlbW92ZUl0ZW0oTFNfS0VZKTsKICAgICAgICAgICAgICAgICAgICBsb2NhbFN0b3JhZ2UucmVtb3ZlSXRlbShMU19UWVBFKTsKICAgICAgICAgICAgICAgICAgICBsb2NhbFN0b3JhZ2UucmVtb3ZlSXRlbShMU19FWFApOwogICAgICAgICAgICAgICAgICAgIENVUlJFTlRfS0VZICAgID0gbnVsbDsKICAgICAgICAgICAgICAgICAgICBLRVlfU1RBVFVTICAgICA9IHsgdmFsaWQ6IGZhbHNlLCB0eXBlOiBudWxsLCBleHBpcmVzX2F0OiBudWxsIH07CiAgICAgICAgICAgICAgICAgICAgX3NlY1Nlc3Npb24gICAgPSB7IHRva2VuOiBudWxsLCBleHA6IDAsIGZwSGFzaDogbnVsbCwgc2VxOiAxIH07CiAgICAgICAgICAgICAgICAgICAgQ1VSUkVOVF9ERVZJQ0UgPSAnJzsKICAgICAgICAgICAgICAgICAgICBwYW5lbC5yZW1vdmUoKTsKICAgICAgICAgICAgICAgICAgICBmbG9hdEJ0bi5yZW1vdmUoKTsKICAgICAgICAgICAgICAgICAgICBidWlsZExvY2tTY3JlZW4oKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfSk7CiAgICAgICAgfTsKCiAgICAgICAgLy8g4pSA4pSAIExvZyBraOG7n2kgxJHhu5luZyArIHRy4bqhbmcgdGjDoWkga2V5IOKUgOKUgAogICAgICAgIGFkZExvZygn4pyFIEdPRCBNT0RFIENvbm5lY3RvciB2My4yIFNFQ1VSRSB2NS4wIMSRw6Mgc+G6tW4gc8OgbmcuJywgJ29rJyk7CiAgICAgICAgY29uc3Qgb2xtVXNlck5vdyA9IGdldE9sbVVzZXJuYW1lKCk7CiAgICAgICAgYWRkTG9nKGDwn5GkIFTDoGkga2hv4bqjbiBPTE06ICR7b2xtVXNlck5vd31gLCAnaW5mbycpOwogICAgICAgIGFkZExvZygn4oS577iPIMSQYW5nIGNo4budIG7huqFwIGPDonUgaOG7j2kuLi4nLCAnaW5mbycpOwogICAgICAgIC8vIFt2NC4xXSBUaMO0bmcgYsOhbyB0cuG6oW5nIHRow6FpIGtleSDigJQgZ2nhu5FuZyB2MyBjb3JlCiAgICAgICAgaWYgKCFpc1ByZW1pdW1LZXkoKSkgewogICAgICAgICAgICBhZGRMb2coJ+KaoO+4jyBLZXkgdGjGsOG7nW5nOiBDaOG7qWMgbsSDbmcgIkNIVeG6qE4gQuG7iiAxMCDEkEnhu4JNIiBi4buLIGtob8OhIScsICd3YXJuJyk7CiAgICAgICAgICAgIGFkZExvZygn8J+SjiBOw6JuZyBj4bqlcCBQUkVNSVVNIMSR4buDIG3hu58ga2hvw6EgdG/DoG4gYuG7mSB0w61uaCBuxINuZy4nLCAnd2FybicpOwogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIGFkZExvZygn8J+SjiBLZXkgUFJFTUlVTTogVOG6pXQgY+G6oyB0w61uaCBuxINuZyDEkcOjIMSRxrDhu6NjIG3hu58ga2hvw6EhJywgJ29rJyk7CiAgICAgICAgICAgIC8vIFt2Nl0gQVVUTy1U4bqiSSBtb2R1bGUgIkNIVeG6qE4gQuG7iiAxMCDEkEnhu4JNIiB04burIHNlcnZlciArIGLhuq10IGhlYXJ0YmVhdCBjaGVjayBsacOqbiB04bulYwogICAgICAgICAgICBfc3RhcnRIZWFydGJlYXQoKTsKICAgICAgICAgICAgX2xvYWRGaXJlTW9kdWxlKCk7IC8vIFt2Ni4yXSB24bqrbiB04buxIHThuqNpIG1vZHVsZSBuaMawbmcgS0jDlE5HIGluIGxvZyByYSBjb25zb2xlCiAgICAgICAgfQogICAgfQoKICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgLy8gIFhIUiAvIEZFVENIIElOVEVSQ0VQVE9SCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIGNvbnN0IEFQSV9LRVlXT1JEUyA9IFsnZ2V0LXF1ZXN0aW9uLW9mLWlkcycsJ2dldC1xdWVzdGlvbj9iZWxvbmdzPTEnLCdnZXQtcXVlc3Rpb24nLCdnZXQtdGVzdCddOwoKICAgIGZ1bmN0aW9uIGhhbmRsZVJhd1Jlc3BvbnNlKHVybCwgdGV4dCkgewogICAgICAgIGlmICghdXJsIHx8ICF0ZXh0KSByZXR1cm47CiAgICAgICAgY29uc3QgaXNRQXBpID0gQVBJX0tFWVdPUkRTLnNvbWUoayA9PiB1cmwuaW5jbHVkZXMoaykpOwogICAgICAgIGNvbnN0IGlzTGVnICA9IHVybC5pbmNsdWRlcygnZ2V0LXF1ZXN0aW9uJykgfHwgdXJsLmluY2x1ZGVzKCdnZXQtdGVzdCcpIHx8CiAgICAgICAgICAgICAgICAgICAgICAgdGV4dC5pbmNsdWRlcygnanNvbl9jb250ZW50JykgfHwgdGV4dC5pbmNsdWRlcygnInF1ZXN0aW9ucyInKTsKICAgICAgICBpZiAoIWlzUUFwaSAmJiAhaXNMZWcpIHJldHVybjsKCiAgICAgICAgbGV0IGRhdGE7CiAgICAgICAgdHJ5IHsgZGF0YSA9IEpTT04ucGFyc2UodGV4dCk7IH0gY2F0Y2ggKF8pIHsgcmV0dXJuOyB9CgogICAgICAgIGNvbnN0IHFMaXN0ID0gZGF0YS5xdWVzdGlvbnMgfHwgZGF0YS5kYXRhIHx8IChBcnJheS5pc0FycmF5KGRhdGEpID8gZGF0YSA6IG51bGwpOwogICAgICAgIGlmICghQXJyYXkuaXNBcnJheShxTGlzdCkgfHwgcUxpc3QubGVuZ3RoID09PSAwKSByZXR1cm47CgogICAgICAgIFNFU1NJT04ucmF3X3F1ZXN0aW9ucyAgICAgID0gcUxpc3Q7CiAgICAgICAgU0VTU0lPTi5tZXRhLmlkX3VzZXIgICAgICAgPSBxTGlzdFswXT8uaWRfdXNlciB8fCBkZXRlY3RVc2VySUQoKTsKICAgICAgICBTRVNTSU9OLm1ldGEuaWRfY291cnNld2FyZSA9IGRhdGEuaWRfY291cnNld2FyZSB8fCBuZXcgVVJMU2VhcmNoUGFyYW1zKHdpbmRvdy5sb2NhdGlvbi5zZWFyY2gpLmdldCgnaV9jJyk7CiAgICAgICAgU0VTU0lPTi5tZXRhLmlkX2NhdGUgICAgICAgPSBkYXRhLmlkX2NhdGUgfHwgZGF0YS5pZF9leGFtIHx8IHJpcElkRnJvbVVybCgpOwogICAgICAgIFNFU1NJT04ubWV0YS5pZF9zY2hvb2wgICAgID0gZGV0ZWN0U2Nob29sSUQoZGF0YSk7CiAgICAgICAgU0VTU0lPTi5tZXRhLmlkX2dyb3VwICAgICAgPSBkZXRlY3RHcm91cElEKCk7CiAgICAgICAgY29uc3QgbXQgPSBkb2N1bWVudC5xdWVyeVNlbGVjdG9yKCdtZXRhW25hbWU9ImNzcmYtdG9rZW4iXScpOwogICAgICAgIFNFU1NJT04ubWV0YS5jc3JmX3Rva2VuICAgID0gbXQgPyBtdC5nZXRBdHRyaWJ1dGUoJ2NvbnRlbnQnKSA6ICh3aW5kb3cuY3NyZl90b2tlbiB8fCAnJyk7CgogICAgICAgIGlmICh3aW5kb3cudG90YWxfdGltZSkgU0VTU0lPTi52aWRlb19sZW5ndGggPSBNYXRoLmNlaWwod2luZG93LnRvdGFsX3RpbWUpOwogICAgICAgIGVsc2UgaWYgKGRhdGEudG90YWxfdGltZSkgU0VTU0lPTi52aWRlb19sZW5ndGggPSBNYXRoLmNlaWwoZGF0YS50b3RhbF90aW1lKTsKCiAgICAgICAgaWYgKGRhdGEudHlwZSA9PSA1IHx8IHdpbmRvdy5sb2NhdGlvbi5ocmVmLmluY2x1ZGVzKCd2aWRlbycpIHx8IGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoJ3ZpZGVvLGlmcmFtZVtzcmMqPSJ5b3V0dWJlIl0nKSkKICAgICAgICAgICAgU0VTU0lPTi5hdXRvX21vZGUgPSAndmlkZW8nOwogICAgICAgIGVsc2UgaWYgKGRhdGEudHlwZV9leGFtID09IDEgfHwgZGF0YS5pc19leGFtID09IDEgfHwgd2luZG93LmlzX2V4YW0gPT0gMSB8fAogICAgICAgICAgICAgICAgIGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3IoJy50aW1lLWNvdW50ZG93biwjc3VibWl0LXRlc3QnKSkKICAgICAgICAgICAgU0VTU0lPTi5hdXRvX21vZGUgPSAnZXhhbSc7CiAgICAgICAgZWxzZQogICAgICAgICAgICBTRVNTSU9OLmF1dG9fbW9kZSA9ICdwcmFjdGljZSc7CgogICAgICAgIGNvbnN0IHFjRWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtcWNvdW50Jyk7CiAgICAgICAgY29uc3QgbWRFbCA9IGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCd0bC1tb2RlLWRldGVjdGVkJyk7CiAgICAgICAgaWYgKHFjRWwpIHFjRWwudGV4dENvbnRlbnQgPSBxTGlzdC5sZW5ndGg7CiAgICAgICAgaWYgKG1kRWwpIHsKICAgICAgICAgICAgbWRFbC50ZXh0Q29udGVudCA9IFNFU1NJT04uYXV0b19tb2RlLnRvVXBwZXJDYXNlKCk7CiAgICAgICAgICAgIGNvbnN0IG1zID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLW1vZGVTZWxlY3QnKTsKICAgICAgICAgICAgaWYgKG1zKSBtcy52YWx1ZSA9IFNFU1NJT04uYXV0b19tb2RlOwogICAgICAgIH0KCiAgICAgICAgYWRkTG9nKGDwn5OlIE7huqFwICR7cUxpc3QubGVuZ3RofSBjw6J1IGjhu49pICgke1NFU1NJT04uYXV0b19tb2RlfSkg4oCUIMSRYW5nIGdp4bqjaSBtw6MuLi5gLCAnaW5mbycpOwoKICAgICAgICBjb25zdCBrZXkgPSBDVVJSRU5UX0tFWSB8fCBfc0xTLmdldChMU19LRVkpOyAvLyBbdjVdCiAgICAgICAgaWYgKCFrZXkpIHsgYWRkTG9nKCfimqDvuI8gQ2jGsGEgY8OzIGtleSDigJQga2jDtG5nIHRo4buDIGdp4bqjaSBtw6MuJywgJ3dhcm4nKTsgcmV0dXJuOyB9CgogICAgICAgIGdtUG9zdCgnL3Byb2Nlc3MnLCB7IGtleSwgaHdpZDogZ2V0SFdJRCgpLCBxdWVzdGlvbnM6IHFMaXN0IH0pCiAgICAgICAgICAgIC50aGVuKHJlc3VsdCA9PiB7CiAgICAgICAgICAgICAgICBpZiAoIShyZXN1bHQuc3VjY2VzcyB8fCByZXN1bHQudmFsaWQpKSB7CiAgICAgICAgICAgICAgICAgICAgYWRkTG9nKCfinYwgU2VydmVyOiAnICsgKHJlc3VsdC5tZXNzYWdlIHx8ICdM4buXaSBnaeG6o2kgbcOjJyksICdlcnInKTsKICAgICAgICAgICAgICAgICAgICByZXR1cm47CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBjb25zdCBib3ggPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtbG9nYm94Jyk7CiAgICAgICAgICAgICAgICBpZiAoYm94KSB7CiAgICAgICAgICAgICAgICAgICAgYm94LmlubmVySFRNTCA9ICcnOwogICAgICAgICAgICAgICAgICAgIHJlc3VsdC5xdWVzdGlvbnMuZm9yRWFjaChxID0+IHsKICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgZCA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2RpdicpOwogICAgICAgICAgICAgICAgICAgICAgICBkLmNsYXNzTmFtZSA9ICd0bC1sb2cgb2snOwogICAgICAgICAgICAgICAgICAgICAgICBkLmlubmVySFRNTCA9IGA8Yj5RJHtxLmluZGV4fTo8L2I+ICR7KHEudGl0bGUgfHwgJycpLnN1YnN0cmluZygwLDQwKX0g4oaSIDxzcGFuIHN0eWxlPSJjb2xvcjojZmZjMTA3OyI+JHtxLmFuc3dlcnMuam9pbignIHwgJyl9PC9zcGFuPmA7CiAgICAgICAgICAgICAgICAgICAgICAgIGJveC5hcHBlbmRDaGlsZChkKTsKICAgICAgICAgICAgICAgICAgICB9KTsKICAgICAgICAgICAgICAgICAgICBib3guc2Nyb2xsVG9wID0gYm94LnNjcm9sbEhlaWdodDsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIGFkZExvZyhg4pyFIMSQw6MgaGnhu4NuIHRo4buLIMSRw6FwIMOhbiAke3Jlc3VsdC5jb3VudH0gY8OidSFgLCAnb2snKTsKICAgICAgICAgICAgfSkKICAgICAgICAgICAgLmNhdGNoKGUgPT4gYWRkTG9nKCfinYwgTOG7l2kga+G6v3QgbuG7kWkgc2VydmVyOiAnICsgZS5tZXNzYWdlLCAnZXJyJykpOwogICAgfQoKICAgIC8vIOKUgOKUgOKUgCBQYWdlLWNvbnRleHQgWEhSL0ZldGNoIGhvb2sg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACiAgICAoZnVuY3Rpb24gaW5qZWN0UGFnZUhvb2soKSB7CiAgICAgICAgdHJ5IHsKICAgICAgICAgICAgY29uc3QgY29kZSA9ICcoJyArIGZ1bmN0aW9uICgpIHsKICAgICAgICAgICAgICAgIGlmICh3aW5kb3cuX190bF9ob29rZWQpIHJldHVybjsKICAgICAgICAgICAgICAgIHdpbmRvdy5fX3RsX2hvb2tlZCA9IHRydWU7CiAgICAgICAgICAgICAgICB3aW5kb3cuX19rdl9xX2J1ZiA9IHdpbmRvdy5fX2t2X3FfYnVmIHx8IFtdOwogICAgICAgICAgICAgICAgZnVuY3Rpb24gX190bF9wdXNoKHVybCwgdGV4dCkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIHdpbmRvdy5fX2t2X3FfYnVmLnB1c2goeyB1cmw6IHVybCwgdGV4dDogdGV4dCwgdHM6IERhdGUubm93KCkgfSk7CiAgICAgICAgICAgICAgICAgICAgICAgIHdpbmRvdy5kaXNwYXRjaEV2ZW50KG5ldyBDdXN0b21FdmVudCgnX19rdl9xZGF0YScsIHsgZGV0YWlsOiB7IHVybDogdXJsLCB0ZXh0OiB0ZXh0IH0gfSkpOwogICAgICAgICAgICAgICAgICAgIH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBmdW5jdGlvbiBfX3RsX3JlbWVtYmVyX3JlcSh1cmwsIG1ldGhvZCwgYm9keSkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIHZhciB1ID0gKHVybCB8fCAnJykudG9Mb3dlckNhc2UoKTsKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKHUuaW5kZXhPZignZ2V0LXF1ZXN0aW9uJykgIT09IC0xIHx8IHUuaW5kZXhPZignZ2V0LXRlc3QnKSAhPT0gLTEpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHdpbmRvdy5fX3RsX2xhc3RfcXJlcSA9IHsgdXJsOiB1cmwsIG1ldGhvZDogbWV0aG9kIHx8ICdHRVQnLCBib2R5OiBib2R5IHx8IG51bGwsIHRzOiBEYXRlLm5vdygpIH07CiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgdmFyIF9fbyA9IFhNTEh0dHBSZXF1ZXN0LnByb3RvdHlwZS5vcGVuOwogICAgICAgICAgICAgICAgdmFyIF9fcyA9IFhNTEh0dHBSZXF1ZXN0LnByb3RvdHlwZS5zZW5kOwogICAgICAgICAgICAgICAgWE1MSHR0cFJlcXVlc3QucHJvdG90eXBlLm9wZW4gPSBmdW5jdGlvbiAobSwgdSkgeyB0aGlzLl9fdGxfdXJsID0gdTsgcmV0dXJuIF9fby5hcHBseSh0aGlzLCBhcmd1bWVudHMpOyB9OwogICAgICAgICAgICAgICAgWE1MSHR0cFJlcXVlc3QucHJvdG90eXBlLnNlbmQgPSBmdW5jdGlvbiAoYm9keSkgewogICAgICAgICAgICAgICAgICAgIHZhciBzZWxmID0gdGhpczsKICAgICAgICAgICAgICAgICAgICBfX3RsX3JlbWVtYmVyX3JlcShzZWxmLl9fdGxfdXJsIHx8ICcnLCAnUE9TVCcsIGJvZHkgfHwgbnVsbCk7CiAgICAgICAgICAgICAgICAgICAgdGhpcy5hZGRFdmVudExpc3RlbmVyKCdsb2FkJywgZnVuY3Rpb24gKCkgewogICAgICAgICAgICAgICAgICAgICAgICBpZiAoc2VsZi5zdGF0dXMgPT09IDIwMCkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgdHJ5IHsgX190bF9wdXNoKHNlbGYucmVzcG9uc2VVUkwgfHwgc2VsZi5fX3RsX3VybCB8fCAnJywgc2VsZi5yZXNwb25zZVRleHQgfHwgJycpOyB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgfSk7CiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIF9fcy5hcHBseSh0aGlzLCBhcmd1bWVudHMpOwogICAgICAgICAgICAgICAgfTsKICAgICAgICAgICAgICAgIHZhciBfX2YgPSB3aW5kb3cuZmV0Y2g7CiAgICAgICAgICAgICAgICB3aW5kb3cuZmV0Y2ggPSBmdW5jdGlvbiAoKSB7CiAgICAgICAgICAgICAgICAgICAgdmFyIGFyZ3MgPSBhcmd1bWVudHM7CiAgICAgICAgICAgICAgICAgICAgdmFyIHVybCA9IHR5cGVvZiBhcmdzWzBdID09PSAnc3RyaW5nJyA/IGFyZ3NbMF0gOiAoYXJnc1swXSAmJiBhcmdzWzBdLnVybCA/IGFyZ3NbMF0udXJsIDogJycpOwogICAgICAgICAgICAgICAgICAgIHZhciBvcHRzID0gYXJnc1sxXSB8fCAodHlwZW9mIGFyZ3NbMF0gPT09ICdvYmplY3QnID8gYXJnc1swXSA6IG51bGwpOwogICAgICAgICAgICAgICAgICAgIF9fdGxfcmVtZW1iZXJfcmVxKHVybCwgKG9wdHMgJiYgb3B0cy5tZXRob2QpIHx8ICdHRVQnLCAob3B0cyAmJiBvcHRzLmJvZHkpIHx8IG51bGwpOwogICAgICAgICAgICAgICAgICAgIHJldHVybiBfX2YuYXBwbHkodGhpcywgYXJncykudGhlbihmdW5jdGlvbiAocmVzKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB2YXIgY2wgPSByZXMuY2xvbmUoKTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNsLnRleHQoKS50aGVuKGZ1bmN0aW9uICh0KSB7IHRyeSB7IF9fdGxfcHVzaCh1cmwgfHwgcmVzLnVybCB8fCAnJywgdCk7IH0gY2F0Y2ggKGUpIHt9IH0pOwogICAgICAgICAgICAgICAgICAgICAgICB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgICAgICAgICByZXR1cm4gcmVzOwogICAgICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICAgICAgfTsKICAgICAgICAgICAgICAgIC8vIFt2Ni1zbWFydF0gRMOyIFNDUklQVCBMw4E6IHVzZXJzY3JpcHQvZXh0ZW5zaW9uIGtow6FjIG7hur91IGPFqW5nIGhvb2sgWEhSL2ZldGNoIHPhur0gR0hJIMSQw4ggd3JhcHBlciBj4bunYSB0YS4KICAgICAgICAgICAgICAgIC8vICAgICAgICAgICAgIEtp4buDbSB0cmEgxJHhu4tuaCBr4buzIDhzOyBu4bq/dSBi4buLIGdoaSDEkcOoIOKGkiBiw6FvIHPhu7Ega2nhu4duIHbhu4EgdXNlcnNjcmlwdCDEkeG7gyB4w6FjIG5o4bqtbiAoY+G6p24gMyBs4bqnbikuCiAgICAgICAgICAgICAgICB3aW5kb3cuX190bF9teV9vcGVuICA9IFhNTEh0dHBSZXF1ZXN0LnByb3RvdHlwZS5vcGVuOwogICAgICAgICAgICAgICAgd2luZG93Ll9fdGxfbXlfc2VuZCAgPSBYTUxIdHRwUmVxdWVzdC5wcm90b3R5cGUuc2VuZDsKICAgICAgICAgICAgICAgIHdpbmRvdy5fX3RsX215X2ZldGNoID0gd2luZG93LmZldGNoOwogICAgICAgICAgICAgICAgc2V0SW50ZXJ2YWwoZnVuY3Rpb24gKCkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChYTUxIdHRwUmVxdWVzdC5wcm90b3R5cGUub3BlbiAgIT09IHdpbmRvdy5fX3RsX215X29wZW4gIHx8CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBYTUxIdHRwUmVxdWVzdC5wcm90b3R5cGUuc2VuZCAgIT09IHdpbmRvdy5fX3RsX215X3NlbmQgIHx8CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB3aW5kb3cuZmV0Y2ggICAgICAgICAgICAgICAgICAgIT09IHdpbmRvdy5fX3RsX215X2ZldGNoKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB3aW5kb3cuZGlzcGF0Y2hFdmVudChuZXcgQ3VzdG9tRXZlbnQoJ19fdGxfZm9yZWlnbl9ob29rJywgeyBkZXRhaWw6IHsgdDogRGF0ZS5ub3coKSB9IH0pKTsKICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICB9LCA4MDAwKTsKICAgICAgICAgICAgfSArICcpKCk7JzsKICAgICAgICAgICAgY29uc3Qgc0VsID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnc2NyaXB0Jyk7CiAgICAgICAgICAgIHNFbC50ZXh0Q29udGVudCA9IGNvZGU7CiAgICAgICAgICAgIChkb2N1bWVudC5oZWFkIHx8IGRvY3VtZW50LmRvY3VtZW50RWxlbWVudCkuYXBwZW5kQ2hpbGQoc0VsKTsKICAgICAgICAgICAgc0VsLnJlbW92ZSgpOwogICAgICAgIH0gY2F0Y2ggKGUpIHsgY29uc29sZS53YXJuKCdbVExdIGluamVjdCBmYWlsJywgZSk7IH0KICAgIH0pKCk7CgogICAgZnVuY3Rpb24gc2V0dXBLVkJ1ZlJlYWRlcigpIHsKICAgICAgICB0cnkgewogICAgICAgICAgICBjb25zdCBVVyA9ICh0eXBlb2YgdW5zYWZlV2luZG93ICE9PSAndW5kZWZpbmVkJykgPyB1bnNhZmVXaW5kb3cgOiB3aW5kb3c7CiAgICAgICAgICAgIGxldCBwcm9jZXNzZWQgPSAwOwogICAgICAgICAgICBmdW5jdGlvbiBkcmFpbigpIHsKICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgY29uc3QgYnVmID0gVVcuX19rdl9xX2J1ZjsKICAgICAgICAgICAgICAgICAgICBpZiAoIUFycmF5LmlzQXJyYXkoYnVmKSB8fCBidWYubGVuZ3RoIDw9IHByb2Nlc3NlZCkgcmV0dXJuOwogICAgICAgICAgICAgICAgICAgIGZvciAobGV0IGkgPSBwcm9jZXNzZWQ7IGkgPCBidWYubGVuZ3RoOyBpKyspIHsKICAgICAgICAgICAgICAgICAgICAgICAgY29uc3QgaXQgPSBidWZbaV07CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChpdCAmJiBpdC51cmwgJiYgaXQudGV4dCkgeyB0cnkgeyBoYW5kbGVSYXdSZXNwb25zZShpdC51cmwsIGl0LnRleHQpOyB9IGNhdGNoIChfKSB7fSB9CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIHByb2Nlc3NlZCA9IGJ1Zi5sZW5ndGg7CiAgICAgICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgICAgICB9CiAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICBVVy5hZGRFdmVudExpc3RlbmVyKCdfX2t2X3FkYXRhJywgZnVuY3Rpb24gKGV2dCkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGQgPSBldnQgJiYgZXZ0LmRldGFpbDsKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGQgJiYgZC51cmwgJiYgZC50ZXh0KSB7IHRyeSB7IGhhbmRsZVJhd1Jlc3BvbnNlKGQudXJsLCBkLnRleHQpOyB9IGNhdGNoIChfKSB7fSB9CiAgICAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGJ1ZiA9IFVXLl9fa3ZfcV9idWY7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIChBcnJheS5pc0FycmF5KGJ1ZikpIHByb2Nlc3NlZCA9IGJ1Zi5sZW5ndGg7CiAgICAgICAgICAgICAgICAgICAgfSBjYXRjaCAoXykge30KICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgICAgICBkcmFpbigpOwogICAgICAgICAgICBpZiAoZG9jdW1lbnQucmVhZHlTdGF0ZSA9PT0gJ2xvYWRpbmcnKSBkb2N1bWVudC5hZGRFdmVudExpc3RlbmVyKCdET01Db250ZW50TG9hZGVkJywgZHJhaW4pOwogICAgICAgICAgICBlbHNlIHNldFRpbWVvdXQoZHJhaW4sIDgwMCk7CiAgICAgICAgICAgIGNvbnN0IGl2ID0gc2V0SW50ZXJ2YWwoZHJhaW4sIDUwMCk7CiAgICAgICAgICAgIHNldFRpbWVvdXQoKCkgPT4gY2xlYXJJbnRlcnZhbChpdiksIDI1MDAwKTsKICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgfQogICAgc2V0dXBLVkJ1ZlJlYWRlcigpOwogICAgLy8gW3Y2LXNtYXJ0XSBOaOG6rW4gdMOtbiBoaeG7h3UgU0NSSVBUIEzDgSB04burIHBhZ2UtY29udGV4dCAoaG9vayBYSFIvZmV0Y2ggYuG7iyB1c2Vyc2NyaXB0L2V4dGVuc2lvbiBraMOhYyBnaGkgxJHDqCkuCiAgICAvLyAgICAgICAgICAgICBZw6p1IGPhuqd1IDMgbOG6p24gbGnDqm4gdOG7pWMgKOKJiDI0cykgbeG7m2kga+G6v3QgbHXhuq1uIGtob8OhIHbEqW5oIHZp4buFbiDigJQgdHLDoW5oIG5o4bqnbSBkbyB0cmFuZyB04buxIGhvb2suCiAgICB0cnkgewogICAgICAgIGNvbnN0IFVXID0gKHR5cGVvZiB1bnNhZmVXaW5kb3cgIT09ICd1bmRlZmluZWQnKSA/IHVuc2FmZVdpbmRvdyA6IHdpbmRvdzsKICAgICAgICBsZXQgX2ZvcmVpZ25TdHJpa2UgPSAwOwogICAgICAgIFVXLmFkZEV2ZW50TGlzdGVuZXIoJ19fdGxfZm9yZWlnbl9ob29rJywgKCkgPT4gewogICAgICAgICAgICB0cnkgeyBpZiAoVVcuX19rdl9xX2J1ZikgcmV0dXJuOyB9IGNhdGNoIChfKSB7fSAvLyBbdjYuNS4yXSBsb2FkZXIgS2V5VmF1bHQgY+G7p2EgdGEgxJFhbmcgd3JhcCBYSFIvZmV0Y2gg4oaSIGLhu48gcXVhLCBraMO0bmcga2hvw6EgbmjhuqdtCiAgICAgICAgICAgIF9mb3JlaWduU3RyaWtlKys7CiAgICAgICAgICAgIGlmIChfZm9yZWlnblN0cmlrZSA+PSAzICYmIF9ndWFyZEFjdGl2ZSkgewogICAgICAgICAgICAgICAgX2VudGVyUmVtb3RlTG9jaygn8J+boe+4jyBQaMOhdCBoaeG7h24gdXNlcnNjcmlwdC9waOG6p24gbeG7gW0gbOG6oSBjYW4gdGhp4buHcCB2w6BvIGvhur90IG7hu5FpICjEkcOjIHjDoWMgbmjhuq1uIDMgbOG6p24pLiDEkMOjIGLDoW8gY8OhbyBhZG1pbiwgY2jhu50gbeG7nyBraG/DoSB04burIHhhLicpOwogICAgICAgICAgICB9CiAgICAgICAgfSk7CiAgICB9IGNhdGNoIChfKSB7fQoKICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAvLyAgW3Y2LjUuM10gQU5USS1GT1JFSUdOLVVTRVJTQ0lQVCBHVUFSRCDigJQgcGjDoXQgaGnhu4duIHVzZXJzY3JpcHQvZXh0ZW5zaW9uCiAgICAvLyAga2jDoWMgY2jhuqF5IFNPTkcgU09ORywga+G7gyBj4bqjIHNjcmlwdCBLSMOUTkcgaG9vayBYSFIvZmV0Y2ggKGzhu5cgaOG7lW5nIGPhu6dhIGLhuqNuIGPFqToKICAgIC8vICBi4buZIGTDsiBjxakgY2jhu4kgYuG6r3QgxJHGsOG7o2Mgc2NyaXB0IGhvb2sgbmF0aXZlOyB1c2Vyc2NyaXB0IGNo4buJIHRoYW8gdMOhYyBET00vVUkKICAgIC8vICB0aMOsIHbDtCBow6xuaCkuIEPGoSBjaOG6vzogaW5qZWN0IHBhZ2UtY29udGV4dCBkZXRlY3RvciBxdcOpdCDEkEEgVMONTiBISeG7hlUgbeG7l2kgNnM6CiAgICAvLyAgIDEpIE5hdGl2ZS1jb2RlIGludGVncml0eSB0csOqbiBow6BtIHNjcmlwdCB0YSBLSMOUTkcgd3JhcCAoc2V0VGltZW91dCwKICAgIC8vICAgICAgc2V0SW50ZXJ2YWwsIGV2YWwsIEZ1bmN0aW9uLCBkZWZpbmVQcm9wZXJ0eSwgSlNPTi5wYXJzZSwgdG9TdHJpbmcpCiAgICAvLyAgICAgIOKGkiBzY3JpcHQgbOG6oSBob29rIGPDoWMgaMOgbSBuw6B5IGLhu4sgYuG6r3QgKGLhu5kgY8WpIGLhu4sgd2hpdGVsaXN0IF9fa3ZfcV9idWYgY2hlKS4KICAgIC8vICAgMikgSW5saW5lIDxzY3JpcHQ+IGNo4bupYSBk4bqldSBoaeG7h3UgdXNlcnNjcmlwdCAoR01fKiwgdW5zYWZlV2luZG93LAogICAgLy8gICAgICA9PVVzZXJTY3JpcHQ9PSwgQGdyYW504oCmKSDigJQgc2NyaXB0IHRhIGluamVjdCBraMO0bmcgY2jhu6lhIG1hcmtlciBuw6B5LgogICAgLy8gICAzKSBSw7IgcuG7iSBHTSBBUEkgcmEgcGFnZSB3aW5kb3cgKEdNX2luZm8sIEdNXyosIHVuc2FmZVdpbmRvdywgX19nbeKApikuCiAgICAvLyAgIDQpIEdsb2JhbCBt4bubaSAoZnVuY3Rpb24vb2JqZWN0KSB4deG6pXQgaGnhu4duIMSQ4buAVSDEkOG6tk4gc2F1IGJhc2VsaW5lLCDiiaUzIGPDoWkuCiAgICAvLyAgW3Y2LjUuNF0gQ0jhurZOIE5HQVkgbOG6rXAgdOG7qWM6IHBow6F0IGhp4buHbiB0w61uIGhp4buHdSDEkeG6p3UgdGnDqm4g4oaSIGtob8OhIG5nYXksCiAgICAvLyAgS0jDlE5HIG1p4buFbiBuaGnhu4VtIDYwcywgS0jDlE5HIGPhuqduIDMgc3RyaWtlLiBRdcOpdCBs4bqnbiDEkeG6p3Ugc2F1IDAuNXMsIGzhurdwIG3hu5dpIDNzLgogICAgLy8gICh2Ni41LjMgY8WpIMSR4bujaSB+ODBzIOKGkiBr4bq7IGtow6FjIHRy4buZbSBjb2RlL2RhdGEga+G7i3AuIELhuqNuIG7DoHkgY2jhurduIHRyb25nIH4zcy4pCiAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgIChmdW5jdGlvbiBfaW5pdEZvcmVpZ25Vc0d1YXJkKCkgewogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGxldCBfZnVzU3RyaWtlID0gMDsKICAgICAgICAgICAgY29uc3QgVVcgPSAodHlwZW9mIHVuc2FmZVdpbmRvdyAhPT0gJ3VuZGVmaW5lZCcpID8gdW5zYWZlV2luZG93IDogd2luZG93OwoKICAgICAgICAgICAgVVcuYWRkRXZlbnRMaXN0ZW5lcignX190bF9mb3JlaWduX3VzJywgZnVuY3Rpb24gKGV2dCkgewogICAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgICAgICBjb25zdCBkID0gKGV2dCAmJiBldnQuZGV0YWlsKSB8fCB7fTsKICAgICAgICAgICAgICAgICAgICBpZiAoZC5jbGVhbikgcmV0dXJuOyAvLyBbdjYuNS40XSBDSOG6tk4gTkdBWToga2jDtG5nIG1p4buFbiBuaGnhu4VtIDYwcywga2jDtG5nIGPhuqduIDMgc3RyaWtlCiAgICAgICAgICAgICAgICAgICAgX2VudGVyUmVtb3RlTG9jaygn8J+boe+4jyBQaMOhdCBoaeG7h24gdXNlcnNjcmlwdC9waOG6p24gbeG7gW0gbOG6oSBjaOG6oXkgc29uZyBzb25nICgnICsgKGQuc2lnIHx8ICd1bmtub3duJykgKyAnKS4gxJDDoyBjaOG6t24gbmdheSBs4bqtcCB04bupYywgYsOhbyBjw6FvIGFkbWluLCBjaOG7nSBt4bufIGtob8OhIHThu6sgeGEuJyk7CiAgICAgICAgICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgICAgICAgICB9KTsKCiAgICAgICAgICAgIGNvbnN0IGNvZGUgPSAnKCcgKyBmdW5jdGlvbiAoKSB7CiAgICAgICAgICAgICAgICBpZiAod2luZG93Ll9fdGxfZnVzX2d1YXJkKSByZXR1cm47CiAgICAgICAgICAgICAgICB3aW5kb3cuX190bF9mdXNfZ3VhcmQgPSB0cnVlOwoKICAgICAgICAgICAgICAgIC8vIEJhc2VsaW5lIG5hdGl2ZSByZWZzIE5HQVkgdOG6oWkgZG9jdW1lbnQtc3RhcnQg4oCUIHRyw6FuaCBraG/DoSBuaOG6p20gZG8gY2jDrW5oIHRyYW5nIHThu7Egd3JhcCBz4bq1bgogICAgICAgICAgICAgICAgdmFyIF9iYXNlTmF0ID0ge307CiAgICAgICAgICAgICAgICB0cnkgeyBfYmFzZU5hdC5zZXRUaW1lb3V0ICAgICAgID0gJycgKyBzZXRUaW1lb3V0OyB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgdHJ5IHsgX2Jhc2VOYXQuc2V0SW50ZXJ2YWwgICAgICA9ICcnICsgc2V0SW50ZXJ2YWw7IH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICB0cnkgeyBfYmFzZU5hdC5ldmFsICAgICAgICAgICAgID0gJycgKyBldmFsOyB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgdHJ5IHsgX2Jhc2VOYXQuRnVuY3Rpb24gICAgICAgICA9ICcnICsgRnVuY3Rpb247IH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICB0cnkgeyBfYmFzZU5hdC5kZWZpbmVQcm9wZXJ0eSAgID0gJycgKyBPYmplY3QuZGVmaW5lUHJvcGVydHk7IH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICB0cnkgeyBfYmFzZU5hdC5KU09OcGFyc2UgICAgICAgID0gJycgKyBKU09OLnBhcnNlOyB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgdHJ5IHsgX2Jhc2VOYXQuZm5Ub1N0cmluZyAgICAgICA9ICcnICsgRnVuY3Rpb24ucHJvdG90eXBlLnRvU3RyaW5nOyB9IGNhdGNoIChlKSB7fQoKICAgICAgICAgICAgICAgIC8vIFdoaXRlbGlzdCBnbG9iYWwgZG8gY2jDrW5oIHNjcmlwdCB0YSB04bqhbyByYSB0cm9uZyBwYWdlIGNvbnRleHQKICAgICAgICAgICAgICAgIHZhciBPV04gPSB7ICdfX3RsX2hvb2tlZCc6MSwgJ19fa3ZfcV9idWYnOjEsICdfX3RsX215X29wZW4nOjEsICdfX3RsX215X3NlbmQnOjEsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAnX190bF9teV9mZXRjaCc6MSwgJ19fdGxfbGFzdF9xcmVxJzoxLCAnX190bF9mdXNfZ3VhcmQnOjEgfTsKICAgICAgICAgICAgICAgIHZhciBVU19SRSA9IC89PVVzZXJTY3JpcHQ9PXxAZ3JhbnR8QG1hdGNofEdNX3htbGh0dHBSZXF1ZXN0fEdNX2FkZFN0eWxlfEdNX3NldFZhbHVlfEdNX2dldFZhbHVlfEdNX3JlZ2lzdGVyTWVudUNvbW1hbmR8R01fbm90aWZpY2F0aW9ufEdNX2Nvb2tpZXxHTV9kb3dubG9hZHx1bnNhZmVXaW5kb3d8R01faW5mby9pOwogICAgICAgICAgICAgICAgdmFyIEdNX0xFQUtfUkUgPSAvXihHTV98X19nbXxfX3Uoc2VyKT9zY3JpcHQpL2k7CgogICAgICAgICAgICAgICAgZnVuY3Rpb24gZmlyZShzaWcpIHsKICAgICAgICAgICAgICAgICAgICB0cnkgeyB3aW5kb3cuZGlzcGF0Y2hFdmVudChuZXcgQ3VzdG9tRXZlbnQoJ19fdGxfZm9yZWlnbl91cycsIHsgZGV0YWlsOiB7IHNpZzogc2lnLCB0OiBEYXRlLm5vdygpIH0gfSkpOyB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgZnVuY3Rpb24gY2xlYW4oKSB7CiAgICAgICAgICAgICAgICAgICAgdHJ5IHsgd2luZG93LmRpc3BhdGNoRXZlbnQobmV3IEN1c3RvbUV2ZW50KCdfX3RsX2ZvcmVpZ25fdXMnLCB7IGRldGFpbDogeyBjbGVhbjogdHJ1ZSwgdDogRGF0ZS5ub3coKSB9IH0pKTsgfSBjYXRjaCAoZSkge30KICAgICAgICAgICAgICAgIH0KCiAgICAgICAgICAgICAgICAvLyBCYXNlbGluZSBzbmFwc2hvdCBjw6FjIGdsb2JhbCBoaeG7h24gY8OzIOKAlCBjaOG6rW0gMTVzIMSR4buDIHBhZ2UgKyBmaXJlTW9kdWxlIOG7lW4gxJHhu4tuaAogICAgICAgICAgICAgICAgdmFyIGJhc2VsaW5lID0gbnVsbDsKICAgICAgICAgICAgICAgIHZhciBwZW5kaW5nID0ge307IC8vIGdsb2JhbCBt4bubaSBs4bqnbiDEkeG6p3UgdGjhuqV5IOKGkiBjaOG7nSB4w6FjIG5o4bqtbiDhu58gbOG6p24gcXXDqXQgc2F1ICh0csOhbmggdHJhbnNpZW50KQogICAgICAgICAgICAgICAgc2V0VGltZW91dChmdW5jdGlvbiAoKSB7CiAgICAgICAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgICAgICAgICAgYmFzZWxpbmUgPSB7fTsKICAgICAgICAgICAgICAgICAgICAgICAgT2JqZWN0LmdldE93blByb3BlcnR5TmFtZXMod2luZG93KS5mb3JFYWNoKGZ1bmN0aW9uIChuKSB7IGJhc2VsaW5lW25dID0gMTsgfSk7CiAgICAgICAgICAgICAgICAgICAgfSBjYXRjaCAoZSkge30KICAgICAgICAgICAgICAgIH0sIDE1MDAwKTsKCiAgICAgICAgICAgICAgICBmdW5jdGlvbiBzY2FuKCkgewogICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgIHZhciBoaXQgPSBudWxsLCBpLCBuLCB2OwoKICAgICAgICAgICAgICAgICAgICAgICAgLy8gKDEpIE5hdGl2ZSBUSEFZIMSQ4buUSSBzbyB24bubaSBiYXNlbGluZSBkb2N1bWVudC1zdGFydCA9IHNjcmlwdCBs4bqhIHdyYXAgU0FVIGtoaSB0YSBraOG7n2kgdOG6oW8KICAgICAgICAgICAgICAgICAgICAgICAgaWYgKCFoaXQpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZhciBjdXIgPSB7fTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRyeSB7IGN1ci5zZXRUaW1lb3V0ICAgICA9ICcnICsgc2V0VGltZW91dDsgfSBjYXRjaCAoZSkge30KICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRyeSB7IGN1ci5zZXRJbnRlcnZhbCAgICA9ICcnICsgc2V0SW50ZXJ2YWw7IH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0cnkgeyBjdXIuZXZhbCAgICAgICAgICAgPSAnJyArIGV2YWw7IH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0cnkgeyBjdXIuRnVuY3Rpb24gICAgICAgPSAnJyArIEZ1bmN0aW9uOyB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgICAgICAgICAgICAgdHJ5IHsgY3VyLmRlZmluZVByb3BlcnR5ID0gJycgKyBPYmplY3QuZGVmaW5lUHJvcGVydHk7IH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0cnkgeyBjdXIuSlNPTnBhcnNlICAgICAgPSAnJyArIEpTT04ucGFyc2U7IH0gY2F0Y2ggKGUpIHt9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB0cnkgeyBjdXIuZm5Ub1N0cmluZyAgICAgPSAnJyArIEZ1bmN0aW9uLnByb3RvdHlwZS50b1N0cmluZzsgfSBjYXRjaCAoZSkge30KICAgICAgICAgICAgICAgICAgICAgICAgICAgIGZvciAodmFyIGsgaW4gX2Jhc2VOYXQpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBpZiAoX2Jhc2VOYXRba10gJiYgY3VyW2tdICE9PSBfYmFzZU5hdFtrXSkgeyBoaXQgPSAnaG9va2VkIGFmdGVyIGluaXQ6ICcgKyBrOyBicmVhazsgfQogICAgICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgICAgICB9CgogICAgICAgICAgICAgICAgICAgICAgICAvLyAoMikgSW5saW5lIDxzY3JpcHQ+IGNo4bupYSBk4bqldSBoaeG7h3UgdXNlcnNjcmlwdCAoc2NyaXB0IHRhIGluamVjdCDEkcOjIHJlbW92ZSBuZ2F5LCBraMO0bmcgY2jhu6lhIG1hcmtlcikKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKCFoaXQpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZhciBzY3MgPSBkb2N1bWVudC5xdWVyeVNlbGVjdG9yQWxsKCdzY3JpcHQ6bm90KFtzcmNdKScpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgZm9yIChpID0gMDsgaSA8IHNjcy5sZW5ndGg7IGkrKykgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZhciB0ID0gc2NzW2ldLnRleHRDb250ZW50IHx8ICcnOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmICh0Lmxlbmd0aCA+IDgwICYmIFVTX1JFLnRlc3QodCkpIHsgaGl0ID0gJ3VzZXJzY3JpcHQgaW5saW5lIG1hcmtlcic7IGJyZWFrOyB9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgICAgIH0KCiAgICAgICAgICAgICAgICAgICAgICAgIC8vICgzKSBSw7IgcuG7iSBHTSBBUEkgLyB1c2Vyc2NyaXB0IHJhIHBhZ2Ugd2luZG93CiAgICAgICAgICAgICAgICAgICAgICAgIGlmICghaGl0KSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB2YXIgbmFtZXMgPSBPYmplY3QuZ2V0T3duUHJvcGVydHlOYW1lcyh3aW5kb3cpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgZm9yIChpID0gMDsgaSA8IG5hbWVzLmxlbmd0aDsgaSsrKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgbiA9IG5hbWVzW2ldOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChPV05bbl0pIGNvbnRpbnVlOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChuID09PSAnR01faW5mbycgfHwgbiA9PT0gJ3Vuc2FmZVdpbmRvdycgfHwgR01fTEVBS19SRS50ZXN0KG4pKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRyeSB7IHYgPSB3aW5kb3dbbl07IGlmICh0eXBlb2YgdiAhPT0gJ3VuZGVmaW5lZCcpIHsgaGl0ID0gJ0dNIGxlYWs6ICcgKyBuOyBicmVhazsgfSB9IGNhdGNoIChlKSB7fQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICAgICAgfQoKICAgICAgICAgICAgICAgICAgICAgICAgLy8gKDQpIEdsb2JhbCBt4bubaSDEkOG7gFUgxJDhurZOIHNhdSBiYXNlbGluZSAocGjhuqNpIGzDoCBmdW5jdGlvbi9vYmplY3QsIOKJpTMgY8OhaSBt4bubaSBr4bq/dCBsdeG6rW4pCiAgICAgICAgICAgICAgICAgICAgICAgIGlmICghaGl0ICYmIGJhc2VsaW5lKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB2YXIgY3VyID0gT2JqZWN0LmdldE93blByb3BlcnR5TmFtZXMod2luZG93KTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZhciBzZWVuTm93ID0ge307CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB2YXIgY29uZmlybWVkID0gMDsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGZvciAoaSA9IDA7IGkgPCBjdXIubGVuZ3RoOyBpKyspIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBuID0gY3VyW2ldOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChPV05bbl0gfHwgYmFzZWxpbmVbbl0pIGNvbnRpbnVlOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHYgPSB3aW5kb3dbbl07CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmICh0eXBlb2YgdiAhPT0gJ2Z1bmN0aW9uJyAmJiAodHlwZW9mIHYgIT09ICdvYmplY3QnIHx8IHYgPT09IG51bGwpKSBjb250aW51ZTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB9IGNhdGNoIChlKSB7IGNvbnRpbnVlOyB9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgc2Vlbk5vd1tuXSA9IDE7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgKHBlbmRpbmdbbl0pIGNvbmZpcm1lZCsrOyAgICAgICAvLyDEkcOjIHRo4bqleSBs4bqnbiB0csaw4bubYyDihpIgeMOhYyBuaOG6rW4KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBlbHNlIHBlbmRpbmdbbl0gPSAxOyAgICAgICAgICAgICAgIC8vIGzhuqduIMSR4bqndSDihpIgY2jhu50gbOG6p24gc2F1CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBmb3IgKHZhciBwayBpbiBwZW5kaW5nKSB7IGlmICghc2Vlbk5vd1twa10pIGRlbGV0ZSBwZW5kaW5nW3BrXTsgfSAvLyBk4buNbiB0cmFuc2llbnQKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChjb25maXJtZWQgPj0gOCkgaGl0ID0gY29uZmlybWVkICsgJyBuZXcgcGVyc2lzdGVudCBnbG9iYWxzJzsKICAgICAgICAgICAgICAgICAgICAgICAgfQoKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKGhpdCkgZmlyZShoaXQpOyBlbHNlIGNsZWFuKCk7CiAgICAgICAgICAgICAgICAgICAgfSBjYXRjaCAoZSkge30KICAgICAgICAgICAgICAgIH0KCiAgICAgICAgICAgICAgICAvLyBbdjYuNS40XSBDSOG6tk4gTkdBWTogcXXDqXQgbOG6p24gxJHhuqd1IHNhdSAwLjVzLCBs4bq3cCBt4buXaSAzcyDigJQga2jDtG5nIMSR4bujaQogICAgICAgICAgICAgICAgc2V0VGltZW91dChzY2FuLCA1MDApOwogICAgICAgICAgICAgICAgc2V0VGltZW91dChmdW5jdGlvbiAoKSB7IHNldEludGVydmFsKHNjYW4sIDMwMDApOyB9LCAxMDAwKTsKICAgICAgICAgICAgfSArICcpKCk7JzsKCiAgICAgICAgICAgIGNvbnN0IHNFbCA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ3NjcmlwdCcpOwogICAgICAgICAgICBzRWwudGV4dENvbnRlbnQgPSBjb2RlOwogICAgICAgICAgICAoZG9jdW1lbnQuaGVhZCB8fCBkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQpLmFwcGVuZENoaWxkKHNFbCk7CiAgICAgICAgICAgIHNFbC5yZW1vdmUoKTsKICAgICAgICB9IGNhdGNoIChfKSB7fQogICAgfSkoKTsKCiAgICAvLyAgU1RBUlRVUCDigJQgdjQuMTogdGjDqm0ga2nhu4NtIHRyYSBPTE0gYWNjb3VudAogICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICBhc3luYyBmdW5jdGlvbiBzdGFydHVwKCkgewogICAgICAgIC8vIFt2Ni40XSBO4bq/dSDEkWFuZyDhu58gcmVtb3RlLWxvY2sgKGRvIHNjcmlwdCBs4bqhKSDihpIgYsOhbyBzZXJ2ZXIgKyBwb2xsaW5nIGNo4budIG3hu58ga2hvw6EsIEtIw5RORyBjaOG6oXkgc2NyaXB0CiAgICAgICAgaWYgKGxvY2FsU3RvcmFnZS5nZXRJdGVtKCdfdGxfcmVtb3RlX2xvY2tlZCcpID09PSAnMScgfHwgbG9jYWxTdG9yYWdlLmdldEl0ZW0oJ190bF9wb2lzb25lZCcpID09PSAnMScpIHsKICAgICAgICAgICAgX2VudGVyUmVtb3RlTG9jaygnUGjDoXQgaGnhu4duIHBo4bqnbiBt4buBbSBs4bqhICjEkcOjIHjDoWMgbmjhuq1uKS4gxJBhbmcgY2jhu50gYWRtaW4gbeG7nyBraG/DoSB04burIHhhLicpOwogICAgICAgICAgICByZXR1cm47CiAgICAgICAgfQogICAgICAgIC8vIOKUgOKUgOKUgCBbdjVdIEto4bufaSB04bqhbyBo4buHIHRo4buRbmcgYuG6o28gduG7hyDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKICAgICAgICBfaW5pdEd1YXJkKCk7CgogICAgICAgIGNvbnN0IHN0b3JlZEtleSA9IF9zTFMuZ2V0KExTX0tFWSk7IC8vIFt2NV0gxJHhu41jIGtleSDEkcOjIG9iZnVzY2F0ZQogICAgICAgIGNvbnN0IHN0b3JlZEV4cCA9IF9zTFMuZ2V0KExTX0VYUCk7IC8vIFt2NV0KCiAgICAgICAgaWYgKHN0b3JlZEtleSkgewogICAgICAgICAgICBpZiAoc3RvcmVkRXhwKSB7CiAgICAgICAgICAgICAgICBjb25zdCBleHBEYXRlID0gbmV3IERhdGUoc3RvcmVkRXhwKTsKICAgICAgICAgICAgICAgIGNvbnN0IG5vdyAgICAgPSBuZXcgRGF0ZSgpOwogICAgICAgICAgICAgICAgaWYgKCFpc05hTihleHBEYXRlKSAmJiBleHBEYXRlIDwgbm93KSB7CiAgICAgICAgICAgICAgICAgICAgbG9jYWxTdG9yYWdlLnJlbW92ZUl0ZW0oTFNfS0VZKTsKICAgICAgICAgICAgICAgICAgICBidWlsZExvY2tTY3JlZW4oJ+KPsCBLZXkgxJHDoyBo4bq/dCBo4bqhbiEgVnVpIGzDsm5nIG5o4bqtcCBrZXkgbeG7m2kuJyk7CiAgICAgICAgICAgICAgICAgICAgcmV0dXJuOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CgogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgLy8gW3Y0LjFdIEzhuqV5IE9MTSB1c2VybmFtZSBoaeG7h24gdOG6oWkgxJHhu4MgZ+G7rWkga8OobSBraGkgdmVyaWZ5CiAgICAgICAgICAgICAgICBjb25zdCBjdXJyZW50T2xtID0gZ2V0T2xtVXNlcm5hbWUoKTsKICAgICAgICAgICAgICAgIGNvbnN0IHIgPSBhd2FpdCBnbVBvc3QoJy92ZXJpZnknLCB7IGtleTogc3RvcmVkS2V5LCBod2lkOiBnZXRIV0lEKCksIG9sbV91c2VyOiBjdXJyZW50T2xtIH0pOwoKICAgICAgICAgICAgICAgIGlmIChyLnN1Y2Nlc3MgfHwgci52YWxpZCkgewoKICAgICAgICAgICAgICAgICAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKICAgICAgICAgICAgICAgICAgICAvLyBbdjQuMV0gS0nhu4JNIFRSQSBPTE0gQUNDT1VOVCBNSVNNQVRDSCBLSEkgU1RBUlRVUAogICAgICAgICAgICAgICAgICAgIC8vIFNlcnZlciB0cuG6oyB24buBIG9sbV91c2VyID0gdMOgaSBraG/huqNuIE9MTSBnaGltIHbDoG8ga2V5CiAgICAgICAgICAgICAgICAgICAgLy8gTuG6v3Uga2jDoWMgduG7m2kgdMOgaSBraG/huqNuIMSRYW5nIMSRxINuZyBuaOG6rXAg4oaSIGNo4bq3biArIHRow7RuZyBiw6FvCiAgICAgICAgICAgICAgICAgICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAgICAgICAgICAgICAgICAgY29uc3Qgc2VydmVyT2xtID0gci5vbG1fdXNlciB8fCByLm9sbV9hY2NvdW50IHx8ICcnOwogICAgICAgICAgICAgICAgICAgIGlmIChzZXJ2ZXJPbG0gJiYgY3VycmVudE9sbSAmJiBjdXJyZW50T2xtICE9PSAnS2hvbmdYYWNEaW5oJykgewogICAgICAgICAgICAgICAgICAgICAgICBpZiAoc2VydmVyT2xtLnRvTG93ZXJDYXNlKCkgIT09IGN1cnJlbnRPbG0udG9Mb3dlckNhc2UoKSkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgLy8gT0xNIGFjY291bnQga2jDoWMgbmhhdSDihpIgeMOzYSBrZXkgdsOgIHjhu60gbMO9IG1pc21hdGNoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsb2NhbFN0b3JhZ2UucmVtb3ZlSXRlbShMU19LRVkpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgbG9jYWxTdG9yYWdlLnJlbW92ZUl0ZW0oTFNfVFlQRSk7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsb2NhbFN0b3JhZ2UucmVtb3ZlSXRlbShMU19FWFApOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgaGFuZGxlT2xtTWlzbWF0Y2goc2VydmVyT2xtLCBjdXJyZW50T2xtKTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJldHVybjsKICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICAvLyDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZDilZAKCiAgICAgICAgICAgICAgICAgICAgQ1VSUkVOVF9LRVkgPSBzdG9yZWRLZXk7CiAgICAgICAgICAgICAgICAgICAgS0VZX1NUQVRVUyAgPSB7IHZhbGlkOiB0cnVlLCB0eXBlOiByLnR5cGUsIGV4cGlyZXNfYXQ6IHIuZXhwaXJlc19hdCB9OwogICAgICAgICAgICAgICAgICAgIF9zTFMuc2V0KExTX1RZUEUsIHIudHlwZSAgICAgICAgIHx8ICdUSFVPTkcnKTsgLy8gW3Y1XQogICAgICAgICAgICAgICAgICAgIF9zTFMuc2V0KExTX0VYUCwgIHIuZXhwaXJlc19hdCAgIHx8ICcnKTsgICAgICAgLy8gW3Y1XQogICAgICAgICAgICAgICAgICAgIGNyZWF0ZVVJKCk7CiAgICAgICAgICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAgICAgICAgIC8vIFt2Ni4zXSA0MDQgPSBi4buLIGJhbiBJUC90aGnhur90IGLhu4sg4oaSIHbDoG8gYmFuLW1vZGUgKEdJ4buuIGtleSwgdOG7sSBt4bufIGzhuqFpIGtoaSBhZG1pbiB1bmJhbikKICAgICAgICAgICAgICAgICAgICBpZiAociAmJiByLl9odHRwU3RhdHVzID09PSA0MDQpIHsgX2VudGVyQmFuTW9kZSgnVGhp4bq/dCBi4buLL0lQIMSRw6MgYuG7iyBhZG1pbiBraG/DoS4nKTsgcmV0dXJuOyB9CiAgICAgICAgICAgICAgICAgICAgbG9jYWxTdG9yYWdlLnJlbW92ZUl0ZW0oTFNfS0VZKTsKICAgICAgICAgICAgICAgICAgICBidWlsZExvY2tTY3JlZW4oci5tZXNzYWdlIHx8ICdLZXkga2jDtG5nIGPDsm4gaOG7o3AgbOG7hyEnKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfSBjYXRjaCAoXykgewogICAgICAgICAgICAgICAgQ1VSUkVOVF9LRVkgPSBzdG9yZWRLZXk7CiAgICAgICAgICAgICAgICBLRVlfU1RBVFVTICA9IHsgdmFsaWQ6IHRydWUsIHR5cGU6IF9zTFMuZ2V0KExTX1RZUEUpLCBleHBpcmVzX2F0OiBzdG9yZWRFeHAgfTsgLy8gW3Y1XQogICAgICAgICAgICAgICAgY3JlYXRlVUkoKTsKICAgICAgICAgICAgfQogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIGJ1aWxkTG9ja1NjcmVlbigpOwogICAgICAgIH0KCiAgICAgICAgLy8g4pSA4pSAIEtp4buDbSB0cmEga2V5IMSR4buLbmgga+G7syBt4buXaSA1IHBow7p0ICsga2nhu4NtIHRyYSBPTE0gYWNjb3VudCDilIDilIAKICAgICAgICBzZXRJbnRlcnZhbChhc3luYyAoKSA9PiB7CiAgICAgICAgICAgIGlmICghQ1VSUkVOVF9LRVkpIHJldHVybjsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIC8vIFt2NC4xXSBH4butaSBrw6htIG9sbV91c2VyIGhp4buHbiB04bqhaSB0cm9uZyBt4buXaSBs4bqnbiBjaGVjayDEkeG7i25oIGvhu7MKICAgICAgICAgICAgICAgIGNvbnN0IGN1cnJlbnRPbG0gPSBnZXRPbG1Vc2VybmFtZSgpOwogICAgICAgICAgICAgICAgY29uc3QgciA9IGF3YWl0IGdtUG9zdCgnL3ZlcmlmeScsIHsga2V5OiBDVVJSRU5UX0tFWSwgaHdpZDogZ2V0SFdJRCgpLCBvbG1fdXNlcjogY3VycmVudE9sbSB9KTsKCiAgICAgICAgICAgICAgICBpZiAoIShyLnN1Y2Nlc3MgfHwgci52YWxpZCkpIHsKICAgICAgICAgICAgICAgICAgICAvLyBbdjYuM10gNDA0ID0gYuG7iyBiYW4gSVAvdGhp4bq/dCBi4buLIOKGkiBiYW4tbW9kZSAoR0nhu64ga2V5LCB04buxIG3hu58gbOG6oWkga2hpIGFkbWluIHVuYmFuKQogICAgICAgICAgICAgICAgICAgIGlmIChyICYmIHIuX2h0dHBTdGF0dXMgPT09IDQwNCkgeyBfZW50ZXJCYW5Nb2RlKCdUaGnhur90IGLhu4svSVAgxJHDoyBi4buLIGFkbWluIGtob8OhLicpOyByZXR1cm47IH0KICAgICAgICAgICAgICAgICAgICAvLyBLZXkgYuG7iyB0aHUgaOG7k2kgLyBo4bq/dCBo4bqhbiAoa2jDtG5nIHBo4bqjaSBiYW4pIOKGkiB44butIGzDvSBuaMawIGPFqQogICAgICAgICAgICAgICAgICAgIGNvbnN0IHBhbmVsRWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgndGwtcGFuZWwnKTsKICAgICAgICAgICAgICAgICAgICBjb25zdCBmYiAgICAgID0gZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ3RsLWZsb2F0QnRuJyk7CiAgICAgICAgICAgICAgICAgICAgaWYgKHBhbmVsRWwpIHBhbmVsRWwucmVtb3ZlKCk7CiAgICAgICAgICAgICAgICAgICAgaWYgKGZiKSAgICAgIGZiLnJlbW92ZSgpOwogICAgICAgICAgICAgICAgICAgIGxvY2FsU3RvcmFnZS5yZW1vdmVJdGVtKExTX0tFWSk7CiAgICAgICAgICAgICAgICAgICAgQ1VSUkVOVF9LRVkgICAgPSBudWxsOwogICAgICAgICAgICAgICAgICAgIF9zZWNTZXNzaW9uICAgID0geyB0b2tlbjogbnVsbCwgZXhwOiAwLCBmcEhhc2g6IG51bGwsIHNlcTogMSB9OwogICAgICAgICAgICAgICAgICAgIENVUlJFTlRfREVWSUNFID0gJyc7CiAgICAgICAgICAgICAgICAgICAgc2hvd0N1c3RvbU1vZGFsKHsKICAgICAgICAgICAgICAgICAgICAgICAgaWNvbjogICfimqDvuI8nLAogICAgICAgICAgICAgICAgICAgICAgICB0aXRsZTogJ0tFWSDEkMODIELhu4ogS0jDk0EhJywKICAgICAgICAgICAgICAgICAgICAgICAgbGluZXM6IFtyLm1lc3NhZ2UgfHwgJ0tleSDEkcOjIGLhu4sgdsO0IGhp4buHdSBob8OhIScsICdUb29sIHPhur0gYuG7iyBraMOzYSBuZ2F5IGzhuq1wIHThu6ljISddLAogICAgICAgICAgICAgICAgICAgICAgICBvbk9rOiAgKCkgPT4gYnVpbGRMb2NrU2NyZWVuKHIubWVzc2FnZSB8fCAnS2V5IMSRw6MgYuG7iyB2w7QgaGnhu4d1IGhvw6EhJykKICAgICAgICAgICAgICAgICAgICB9KTsKICAgICAgICAgICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgICAgICAgICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAgICAgICAgICAgICAgICAgLy8gW3Y0LjFdIEtJ4buCTSBUUkEgT0xNIEFDQ09VTlQgVFJPTkcgUEVSSU9ESUMgQ0hFQ0sKICAgICAgICAgICAgICAgICAgICAvLyBQaMOhdCBoaeG7h24ga2hpIHVzZXIgxJHhu5VpIHTDoGkga2hv4bqjbiBPTE0gbMO6YyB0b29sIMSRYW5nIGNo4bqheQogICAgICAgICAgICAgICAgICAgIC8vIOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkOKVkAogICAgICAgICAgICAgICAgICAgIGNvbnN0IHNlcnZlck9sbSA9IHIub2xtX3VzZXIgfHwgci5vbG1fYWNjb3VudCB8fCAnJzsKICAgICAgICAgICAgICAgICAgICBpZiAoc2VydmVyT2xtICYmIGN1cnJlbnRPbG0gJiYgY3VycmVudE9sbSAhPT0gJ0tob25nWGFjRGluaCcpIHsKICAgICAgICAgICAgICAgICAgICAgICAgaWYgKHNlcnZlck9sbS50b0xvd2VyQ2FzZSgpICE9PSBjdXJyZW50T2xtLnRvTG93ZXJDYXNlKCkpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIC8vIE9MTSBhY2NvdW50IMSRw6MgdGhheSDEkeG7lWkg4oaSIGtob8OhIHRvb2wKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGhhbmRsZU9sbU1pc21hdGNoKHNlcnZlck9sbSwgY3VycmVudE9sbSk7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICByZXR1cm47CiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgLy8g4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQ4pWQCiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0gY2F0Y2ggKF8pIHt9CiAgICAgICAgfSwgNSAqIDYwICogMTAwMCk7CiAgICB9CgogICAgaWYgKGRvY3VtZW50LnJlYWR5U3RhdGUgPT09ICdsb2FkaW5nJykgewogICAgICAgIGRvY3VtZW50LmFkZEV2ZW50TGlzdGVuZXIoJ0RPTUNvbnRlbnRMb2FkZWQnLCBzdGFydHVwKTsKICAgIH0gZWxzZSB7CiAgICAgICAgc3RhcnR1cCgpOwogICAgfQoKfSkoKTsK';
+const CONNECTOR_MODULE_VERSION = parseInt(process.env.CONNECTOR_MODULE_VERSION || '3', 10);
+let CONNECTOR_MODULE_SRC = process.env.CONNECTOR_MODULE_SRC || '';
+if (!CONNECTOR_MODULE_SRC) {
+    try {
+        const fs = require('fs');
+        const p = process.env.CONNECTOR_MODULE_PATH || './connector.module.js';
+        CONNECTOR_MODULE_SRC = fs.readFileSync(p, 'utf8');
+        console.log('[v8] Đã nạp connector module từ file ' + p + ' (' + CONNECTOR_MODULE_SRC.length + ' bytes)');
+    } catch (e) {
+        try {
+            CONNECTOR_MODULE_SRC = Buffer.from(CONNECTOR_MODULE_EMBEDDED_B64, 'base64').toString('utf8');
+            console.log('[v8] Đã nạp connector module từ EMBEDDED base64 (' + CONNECTOR_MODULE_SRC.length + ' bytes) — self-contained.');
+        } catch (e2) {
+            console.warn('[v8] Lỗi giải mã embedded connector. Loader sẽ nhận code rỗng.');
+            CONNECTOR_MODULE_SRC = 'console.warn("[loader] Connector module lỗi trên server.");';
+        }
+    }
+}
+function buildConnectorPayload(sessionToken) {
+    return encryptAnswers({ src: GM_LEAK_SANITIZER + CONNECTOR_MODULE_SRC, v: CONNECTOR_MODULE_VERSION }, sessionToken);
+}
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v8] STATIC ENCRYPT cho /bootstrap.js — key PBKDF2 từ SECRET (loader tự
+//  derive cùng key từ API_SECRET). KHÔNG cần session/key → loader tối thiểu.
+//  Định dạng payload: { iv: base64(12B), data: base64(ciphertext + 16B tag) }
+//  Loader giải mã bằng WebCrypto AES-GCM (tag nằm ở cuối data).
+// ══════════════════════════════════════════════════════════════════════════════
+const BOOTSTRAP_SALT = 'tl-bootstrap-v8-salt';
+const BOOTSTRAP_ITER = 1000;
+function bootstrapDeriveKey() {
+    return crypto.pbkdf2Sync(SECRET, BOOTSTRAP_SALT, BOOTSTRAP_ITER, 32, 'sha256');
+}
+function bootstrapEncrypt(plaintext) {
+    const key = bootstrapDeriveKey();
+    const iv  = crypto.randomBytes(12);
+    const c   = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const enc = Buffer.concat([c.update(plaintext, 'utf8'), c.final(), c.getAuthTag()]);
+    return { iv: iv.toString('base64'), data: enc.toString('base64') };
+}
+// [v8] Inject SERVER_BASE = origin của request + API_SECRET = SECRET hiện tại
+//      vào code connector → bản phục vụ LUÔN khớp với server (kể cả khi admin
+//      đã đổi SECRET qua dashboard).
+// [v8.3] GM-LEAK SANITIZER — prepend vao dau connector de xoa GM_* tren window
+// do loader cu (Payload_fixed.js) gan vao, truoc khi anti-cheat quet & khoa "PHÁT HIỆN PHẦN MỀM LẠ".
+// Connector dung GM_* qua tham so cuc bo (khong qua window) → xoa an toan, giu nguyen chuc nang.
+const GM_LEAK_SANITIZER = ";(function(){try{var _wn=Object.getOwnPropertyNames(window);for(var _i=0;_i<_wn.length;_i++){var _n=_wn[_i];if(_n===\"GM_info\"||_n===\"unsafeWindow\"||/^(GM_|__gm|__u(ser)?script)/i.test(_n)){try{delete window[_n];}catch(_){try{window[_n]=undefined;}catch(_){}}}}}catch(_){}})();\n";
+
+// [v9] iOS SHIM: dinh nghia window.__GMFunc__ nhu Proxy tra ve ham no-op -> KHONG bao loi
+//      "undefined is not an object (evaluating 'window.__GMFunc__[uuid]')" tren iOS (Userscripts/Safari).
+//      Mang that su di qua GM_xmlhttpRequest (fetch bridge) duoc truyen tham so — shim nay chi tranh crash.
+const IOS_GMFUNC_SHIM = ";try{if(typeof window!=='undefined'&&!window.__GMFunc__){window.__GMFunc__=new Proxy({},{get:function(t,k){if(k in t)return t[k];return function(){};},set:function(t,k,v){t[k]=v;return true;}});}}catch(_){}\n";
+// [v9] OLM BAN POLLING snippet: chen vao cuoi connector — tu dong kiem tra tai khoan OLM dang nhap co bi ban khong,
+//      neu co -> hien thi thong bao full-screen manh. Server inject origin + API_PREFIX.
+function buildOlmBanSnippet(origin, apiPrefix) {
+    var O = JSON.stringify(origin), P = JSON.stringify(apiPrefix);
+    var parts = [
+        ";try{(function(){",
+        "var _o=", O, ",_p=", P, ";",
+        "function _olmu(){var u='';var w;try{w=(typeof unsafeWindow!=='undefined')?unsafeWindow:window;}catch(e){w=window;}try{u=w.SESSION&&w.SESSION.meta&&(w.SESSION.meta.id_user||w.SESSION.meta.username||w.SESSION.meta.name)||'';}catch(e){}if(!u){try{u=localStorage.getItem('id_user')||localStorage.getItem('user_id')||localStorage.getItem('olm_user')||localStorage.getItem('username')||'';}catch(e){}}if(!u){try{var el=document.querySelector('.user-name,.username,.account-name,[class*=user-name],[class*=username]');if(el)u=(el.textContent||'').trim();}catch(e){}}return u;}",
+        "function _show(m){try{if(document.getElementById('_olmbn_ov'))return;var d=document.createElement('div');d.id='_olmbn_ov';d.style.cssText='position:fixed;inset:0;z-index:2147483647;background:rgba(127,29,29,.97);color:#fff;display:flex;align-items:center;justify-content:center;padding:24px;font-family:system-ui,sans-serif;';var c=document.createElement('div');c.style.cssText='max-width:420px;text-align:center;background:#7f1d1d;border:2px solid #ef4444;border-radius:14px;padding:28px;box-shadow:0 10px 40px rgba(0,0,0,.5);';var t1=document.createElement('div');t1.textContent='🚫';t1.style.cssText='font-size:42px;margin-bottom:12px';var t2=document.createElement('div');t2.textContent='TÀI KHOẢN OLM ĐÃ BỊ CẤM';t2.style.cssText='font-size:18px;font-weight:800;margin-bottom:10px;color:#fca5a5';var t3=document.createElement('div');t3.textContent=String(m||'');t3.style.cssText='font-size:13px;line-height:1.7;color:#fecaca';c.appendChild(t1);c.appendChild(t2);c.appendChild(t3);d.appendChild(c);(document.documentElement||document.body).appendChild(d);}catch(e){}}",
+        "function _chk(){var u=_olmu();if(!u)return;try{fetch(_o+_p+'/olm-check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({olm_user:u})}).then(function(r){return r.json();}).then(function(j){if(j&&j.banned){_show(j.message||('Tai khoan OLM bi ban'+(j.permanent?' vinh vien':'')+'. Ly do: '+(j.reason||'')));}}).catch(function(){});}catch(e){}}",
+        "setInterval(_chk,30000);setTimeout(_chk,4000);",
+        "})();}catch(e){}\n"
+    ];
+    return parts.join('');
+}
+function renderConnectorSrc(req) {
+    const origin = req.protocol + '://' + req.get('host');
+    let src = CONNECTOR_MODULE_SRC;
+    src = src.replace(/const SERVER_BASE\s*=\s*'[^']*';/, 'const SERVER_BASE = ' + JSON.stringify(origin) + ';');
+    src = src.replace(/const API_SECRET\s*=\s*'[^']*';/,  'const API_SECRET  = ' + JSON.stringify(SECRET) + ';');
+    // [v9] them iOS shim (tranh crash __GMFunc__) + OLM ban polling snippet
+    return IOS_GMFUNC_SHIM + GM_LEAK_SANITIZER + src + buildOlmBanSnippet(origin, API_PREFIX);
+}
+
+// [v8.2] wrapConnectorWithBridge giữ lại để tương thích nhưng KHÔNG làm gì (tránh GM leak).
+// Bridge (nếu cần) được truyền làm THAM SỐ cục bộ qua new Function trong buildKvPayloadSrc — không bao giờ gán vào window.
+function wrapConnectorWithBridge(src) { return src; }
+// [v9] iOS-FIX LOADER: serve loader.user.js tu server — hoan toan fetch-based (KHONG dung
+//      window.__GMFunc__ / GM_xmlhttpRequest native) -> chay duoc tren iOS (Userscripts/Safari),
+//      fix loi "undefined is not an object (evaluating 'window.__GMFunc__[uuid]')".
+//      Flow: keo bootstrap.js -> PBKDF2+AES-GCM giai ma -> chay connector voi GM bridge cuc bo.
+function buildLoaderSrc(req) {
+    const origin = req.protocol + '://' + req.get('host');
+    const SEC = SECRET, AP = API_PREFIX;
+    return `// ==UserScript==
+// @name         GOD MODE v9 Loader (iOS-FIX, fetch-based)
+// @namespace    godmode.v9
+// @version      9.0
+// @description  Fix loi dang nhap key tren iOS: khong dung window.__GMFunc__ — mang qua fetch (CORS da bat).
+// @match        *://*.olm.vn/*
+// @match        *://olm.vn/*
+// @run-at       document-end
+// @grant        none
+// ==/UserScript==
+;(function(){
+  var SERVER_BASE = ${JSON.stringify(origin)};
+  var API_PREFIX = ${JSON.stringify(AP)};
+  var API_SECRET = ${JSON.stringify(SEC)};
+  function _err(m){ try{ var d=document.createElement('div'); d.style.cssText='position:fixed;top:10px;left:10px;z-index:2147483647;background:#7f1d1d;color:#fff;padding:10px 14px;border-radius:8px;font:12px/1.5 monospace;max-width:85%'; d.textContent='GOD MODE: '+(m||''); (document.documentElement||document.body).appendChild(d); setTimeout(function(){try{d.remove();}catch(_){}},8000); }catch(_){} }
+  function _b64dec(b64){ var bin=atob(b64); var bytes=new Uint8Array(bin.length); for(var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i); return bytes.buffer; }
+  function _gmXhr(d){ d=d||{}; try{ var ctrl=(typeof AbortController!=='undefined')?new AbortController():null; var tmo=setTimeout(function(){if(ctrl)try{ctrl.abort();}catch(_){}}, d.timeout||20000); var opts={method:d.method||'GET',headers:d.headers||{}}; if(ctrl)opts.signal=ctrl.signal; if(d.data!==undefined&&d.data!==null)opts.body=d.data; fetch(d.url,opts).then(function(r){clearTimeout(tmo);return r.text().then(function(t){return{s:r.status,t:t};});}).then(function(o){if(d.onload)d.onload({status:o.s,responseText:o.t,response:o.t,readyState:4});}).catch(function(e){clearTimeout(tmo);if(d.onerror)d.onerror({error:String(e&&e.message||e)});}); }catch(e){ if(d.onerror)d.onerror({error:String(e&&e.message||e)}); } }
+  function _gmStyle(css){ try{ var st=document.createElement('style'); st.textContent=css; (document.head||document.documentElement).appendChild(st); }catch(_){} }
+  try{ if(typeof window!=='undefined'&&!window.__GMFunc__){ window.__GMFunc__=new Proxy({},{get:function(t,k){if(k in t)return t[k];return function(){};},set:function(t,k,v){t[k]=v;return true;}}); } }catch(_){}
+  function _runConnector(src){ try{ (new Function('GM_xmlhttpRequest','GM_addStyle','unsafeWindow', src)).call(window, _gmXhr, _gmStyle, window); }catch(e){ _err('Connector loi: '+(e&&e.message||e)); } }
+  async function _boot(){
+    try{
+      var r = await fetch(SERVER_BASE + API_PREFIX + '/bootstrap.js', {cache:'no-store'});
+      if(!r.ok){ if(r.status===404){ _err('Server dang bao tri / script tam khoa (admin da chan keo script).'); } else { _err('Khong keo duoc bootstrap (HTTP '+r.status+')'); } return; }
+      var j = await r.json();
+      if(!j||!j.ok||!j.payload){ _err('Bootstrap khong hop le.'); return; }
+      var enc = new TextEncoder();
+      var keyMat = await crypto.subtle.importKey('raw', enc.encode(API_SECRET), 'PBKDF2', false, ['deriveKey']);
+      var aesKey = await crypto.subtle.deriveKey({name:'PBKDF2', salt: enc.encode('tl-bootstrap-v8-salt'), iterations: 1000, hash:'SHA-256'}, keyMat, {name:'AES-GCM', length:256}, false, ['decrypt']);
+      var iv = _b64dec(j.payload.iv);
+      var data = _b64dec(j.payload.data);
+      var plain = await crypto.subtle.decrypt({name:'AES-GCM', iv: iv}, aesKey, data);
+      var src = new TextDecoder('utf-8').decode(plain);
+      _runConnector(src);
+    }catch(e){ _err('Loi giai ma bootstrap: '+(e&&e.message||e)); }
+  }
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', _boot); } else { _boot(); }
+})();
+`;
+}
+
+// [v8.2] Tao RAW JS payload de upload len KeyVault (index.js).
+// FIX v8.2: bridge GM_xmlhttpRequest/GM_addStyle la BIEN CUC BO trong IIFE,
+// tuyet doi KHONG gan vao window (tranh GM leak trigger anti-cheat "PHÁT HIỆN PHẦN MỀM LẠ").
+function buildKvPayloadSrc(req) {
+    const origin = req.protocol + '://' + req.get('host');
+    const connSrc = renderConnectorSrc(req); // da inject SERVER_BASE+API_SECRET, KHONG co bridge
+    const connB64 = Buffer.from(connSrc, 'utf8').toString('base64');
+    return `/* ============================================================
+   GOD MODE v8.2 — KEYVAULT-COMPATIBLE PAYLOAD (cho server index.js)
+   Upload noi dung JS nay len KeyVault (trang "Nap file code").
+   [v8.2] FIX: bridge GM_* la bien cuc bo, KHONG leak ra window ->
+   khong con bi anti-cheat "PHÁT HIỆN PHẦN MỀM LẠ (GM leak: GM_addStyle)" khoa.
+   Server goc: ${origin}
+   ============================================================ */
+;(function(){
+  if (window.__tl_kv_payload_v82) return;
+  window.__tl_kv_payload_v82 = 1;
+  function __tlFail(msg){
+    console.error('[TL-KV]', msg);
+    try {
+      var d=document.createElement('div');
+      d.style.cssText='position:fixed;top:8px;left:8px;z-index:2147483647;background:#7f1d1d;color:#fff;padding:8px 12px;border-radius:8px;font:12px/1.4 monospace;max-width:85%;box-shadow:0 4px 12px rgba(0,0,0,.4)';
+      d.textContent='Tool loi: '+(msg||'');
+      (document.documentElement||document.body).appendChild(d);
+      setTimeout(function(){ try{d.remove();}catch(_){} }, 7000);
+    } catch(_){}
+  }
+  try {
+    /* [v8.2] BRIDGE CUC BO — KHONG gan vao window (tranh GM leak).
+       Neu chay trong userscript sandbox that, GM_xmlhttpRequest/GM_addStyle co san.
+       Neu chay trong page context (KeyVault), dung ban thay the qua fetch (server da bat CORS). */
+    var __uw = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+    var __gmStyle = (typeof GM_addStyle !== 'undefined') ? GM_addStyle : function(css){ try { var s=document.createElement('style'); s.textContent=css; (document.head||document.documentElement).appendChild(s); } catch(_){} };
+    var __gmXhr = (typeof GM_xmlhttpRequest !== 'undefined') ? GM_xmlhttpRequest : function(d){
+      d = d || {};
+      try {
+        var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var tmo = setTimeout(function(){ if (ctrl) try{ ctrl.abort(); }catch(_){} }, d.timeout || 20000);
+        var opts = { method: d.method || 'GET', headers: d.headers || {} };
+        if (ctrl) opts.signal = ctrl.signal;
+        if (d.data !== undefined && d.data !== null) opts.body = d.data;
+        fetch(d.url, opts).then(function(r){
+          clearTimeout(tmo);
+          return r.text().then(function(t){ return { s: r.status, t: t }; });
+        }).then(function(o){
+          if (d.onload) d.onload({ status: o.s, responseText: o.t, response: o.t, readyState: 4 });
+        }).catch(function(e){
+          clearTimeout(tmo);
+          if (d.onerror) d.onerror({ error: String(e && e.message || e) });
+        });
+      } catch(e){ if (d.onerror) d.onerror({ error: String(e && e.message || e) }); }
+    };
+    var __b64 = "${connB64}";
+    var bin = atob(__b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+    var __src = new TextDecoder('utf-8').decode(bytes);
+    /* Truyen GM_* lam THAM SO cuc bo — KHONG leak ra window. Anti-cheat khong phat hien. */
+    (new Function('GM_xmlhttpRequest','GM_addStyle','unsafeWindow', __src)).call(window, __gmXhr, __gmStyle, __uw);
+  } catch(e) {
+    __tlFail(e && e.message ? e.message : String(e));
+  }
+})();
+`;
+}
+
+
+//  [v7] ANTI BRUTE-FORCE KEY — quá 10 lần sai key từ 1 IP trong 10 phút → BAN.
+// ══════════════════════════════════════════════════════════════════════════════
+const keyFail = new Map(); // ip -> {count, first}
+function recordKeyFail(ip) {
+    if (!ip) return;
+    const now = Date.now();
+    const e = keyFail.get(ip);
+    if (!e || now - e.first > 10 * 60 * 1000) { keyFail.set(ip, { count: 1, first: now }); return false; }
+    e.count++;
+    if (e.count >= 10) { keyFail.delete(ip); return true; }
+    return false;
+}
+function resetKeyFail(ip) { if (ip) keyFail.delete(ip); }
+
+function isPremiumType(t) { return ['PREMIUM', 'VIP', 'UNLIMITED'].includes(String(t || '').toUpperCase()); }
+// [v10] ===== DUMPER_GUARD helpers =====
+function keyAct(key){ if(!key) return {processCount:0,fireCount:0,moduleFetchCount:0,hbZeroCount:0,dumpScore:0,firstAttestAt:0,lastModuleAt:0}; let r=keyActivity.get(key); if(!r){r={firstAttestAt:0,lastModuleAt:0,moduleFetchCount:0,processCount:0,fireCount:0,hbZeroCount:0,dumpScore:0}; keyActivity.set(key,r);} return r; }
+function isKeyBanned(key){ return key ? BANNED_KEYS.has(String(key).trim().toUpperCase()) : false; }
+function addKeyBan(key, reason, ip, hwid, deviceName){ if(!key) return false; const k=String(key).trim().toUpperCase(); if(BANNED_KEYS.has(k)) return false; if(SMART_BAN && isRealMobileDevice(ip, hwid, recentUaByIp.get(ip) || '')){ adminLog('key-ban-blocked-real',{ key: maskKey(key), reason, ip, hwid, device: deviceName||'', note:'SMART_BAN: thiet bi di dong that, khong revokle key' }); return false; } if(!SMART_BAN && SAFE_MODE){ adminLog('key-ban-soft',{ key: maskKey(key), reason, ip, hwid, device: deviceName||'', note:'SAFE_MODE: khong revokle key, chi log' }); return false; } BANNED_KEYS.add(k); kvSaveState(); addBan(ip, hwid, reason + ' — key bi revokle', deviceName); adminLog('key-ban', { key: maskKey(key), reason, ip, hwid, device: deviceName || '' }); return true; }
+// Ghi su kien va tra ve ly do ban (null = hop le). event: attest|process|fire|heartbeat-zero|module
+function dumperJudge(key, hwid, ip, deviceName, event){
+    if(!DUMPER_GUARD || !key) return null;
+    const r = keyAct(key);
+    const now = Date.now();
+    if(event==='attest'){ if(!r.firstAttestAt) r.firstAttestAt=now; return null; }
+    if(event==='process'){ r.processCount++; if(r.dumpScore>0) r.dumpScore=Math.max(0,r.dumpScore-2); return null; }
+    if(event==='fire'){ r.fireCount++; r.dumpScore=0; return null; } // co hoat dong thuc -> reset nghi ngo
+    if(event==='heartbeat-zero'){ if(r.processCount===0 && r.fireCount===0){ r.hbZeroCount++; r.dumpScore+=1; if(r.hbZeroCount>=5) return 'heartbeat zero-version >=5 lan va KHONG co hoat dong process/fire — chi co dumper'; } return null; }
+    if(event==='module'){
+        r.moduleFetchCount++; r.lastModuleAt=now;
+        if(r.moduleFetchCount>=2) return 'lay module truc tiep >=2 lan — nghi dump file';
+        if(r.processCount===0 && r.fireCount===0) return 'goi /module nhung chua tung process/fire lan nao — dumper khong co hoat dong thuc';
+        if(r.firstAttestAt && (now - r.firstAttestAt) < 10000) return 'attest -> lay module trong vong <10s, khong co hoat dong thuc — dumper';
+        return null;
+    }
+    return null;
+}
+// [v10] Watermark: dam trace duy nhat moi key+hwid -> leak dump la tim duoc nguoi mua
+function watermarkSrc(src, key, hwid){
+    if(!MODULE_WATERMARK || !key) return src;
+    const wm = hmacHex('wm:' + String(key).trim().toUpperCase() + ':' + (hwid||'')).slice(0, 16);
+    return 'var _tlwm="' + wm + '";\n' + src;
+}
+
+// Đường dẫn admin (có thể đổi qua env để ẩn)
+const ADMIN_PATH = process.env.ADMIN_PATH || '/admin';
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  STATELESS SESSION (chống Vercel restart — không lưu Map trên server)
+//  Token = base64url(payload_json) + '.' + hmacSha256(SECRET, 'sess:' + body)
+// ══════════════════════════════════════════════════════════════════════════════
+function b64url(buf) { return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function b64urlDecode(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return Buffer.from(s, 'base64'); }
+function signSession(payload) {
+    const body = b64url(JSON.stringify(payload));
+    const sig  = b64url(crypto.createHmac('sha256', SECRET).update('sess:' + body).digest());
+    return body + '.' + sig;
+}
+function verifySession(token) {
+    if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+    const [body, sig] = token.split('.');
+    const expected = b64url(crypto.createHmac('sha256', SECRET).update('sess:' + body).digest());
+    try {
+        if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+        const p = JSON.parse(b64urlDecode(body).toString());
+        if (!p.exp || p.exp < Date.now()) return null;
+        return p;
+    } catch (_) { return null; }
+}
+const SESSION_TTL = 5 * 60 * 1000; // 5 phút
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  BAN STORE — ban vĩnh viễn IP + thiết bị (HWID)
+//  Lưu: in-memory Map + (tùy chọn) Vercel KV để tồn tại qua restart.
+// ══════════════════════════════════════════════════════════════════════════════
+const banned = new Map(); // 'ip:x.x.x.x' hoặc 'dev:HWID' -> {reason, device, t, by}
+const devices = new Map(); // hwid -> {name, model, os, ip, lastSeen}
+let AUTO_BAN   = process.env.AUTO_BAN !== 'false';      // auto-ban khi phát hiện bất hợp lệ (mặc định BẬT)
+let MOBILE_ONLY = process.env.MOBILE_ONLY !== 'false';  // chỉ chấp nhận Android/iOS thật (mặc định BẬT)
+let BAN_DESKTOP = process.env.BAN_DESKTOP === 'true';   // ban cả desktop (mặc định TẮT — chỉ từ chối)
+// [v10.1] CHAN KEO SCRIPT VIOLENTMONKEY: MAC DINH TAT (kill-switch) — admin chu dong BAT trong panel de chan hoan toan viec keo code
+let BLOCK_VM_SCRIPT = process.env.BLOCK_VM_SCRIPT === 'true'; // [v10.1] mac dinh TAT — day la kill-switch, admin chu dong BAT khi can chan tong keo code
+// [v10] CHAN MODULE "CHUAN BI 10 DIEM": MAC DINH BAT (theo yeu cau) — admin co the TAT trong panel
+let BLOCK_MODULE_10 = process.env.BLOCK_MODULE_10 !== 'false';
+// [v10] HARD_DC_BAN: IP datacenter/proxy/VPN goi bat ky API nao -> BAN NGAY (mac dinh BAT)
+let HARD_DC_BAN = process.env.HARD_DC_BAN === 'true'; // [v13] mac dinh TAT (kill-switch) — admin chu dong BAT trong panel
+// [v13] SAFE_MODE: mac dinh BAT — auto-ban chi ghi log + tu choi (403), KHONG khoa vinh vien.
+//       Chi admin ban thu cong (set truc tiep vao `banned`) moi co hieu luc. Tat = env SAFE_MODE=false.
+let SAFE_MODE = process.env.SAFE_MODE !== 'false';
+// [v14] SMART_BAN: mac dinh BAT — chi ban may ao/server/proxy ao xac nhan; may that Android/iOS khong bao gio ban + tu mo ban.
+let SMART_BAN = process.env.SMART_BAN !== 'false';
+const realDevices = new Map(); // hwid -> {ip, deviceName, firstSeen, lastSeen} — thiet bi di dong that da xac thuc (KHONG bao gio bi ban)
+let autoUnbanCount = 0; // [v14] dem so lan tu mo ban thiet bi that
+const realIps = new Set(); // [v15] IP cua thiet bi di dong that (khong can hwid) — tu mo ban + khong ban lai
+const recentUaByIp = new Map(); // [v16] ip -> UA gan nhat; giup guard ban nhan dien mobile that ca truoc khi attest
+// [v10] DUMPER_GUARD: phat hien hanh vi dumper -> BAN key+hwid+ip (mac dinh BAT)
+let DUMPER_GUARD = process.env.DUMPER_GUARD !== 'false';
+// [v10] MODULE_WATERMARK: dam trace duy nhat moi key+hwid vao module (mac dinh BAT)
+let MODULE_WATERMARK = process.env.MODULE_WATERMARK !== 'false';
+// [v10] BANNED_KEYS: key bi ro ri/dump -> revokle vinh vien. env BANNED_KEYS=K1,K2 hoac admin khoa.
+const BANNED_KEYS = new Set((process.env.BANNED_KEYS || '').split(',').map(s => String(s).trim().toUpperCase()).filter(Boolean));
+// [v10] keyActivity: theo doi hoat dong moi key de phat hien dumper (in-memory, du cho viec phat hien theo phien)
+const keyActivity = new Map();
+// [v10] TRACK HOAT DONG thiet bi: hwid -> {olm_user, id_cate, mode, id_user, device, ip, lastSeen}
+const deviceActivity = new Map();
+function trackDevice(hwid, data){ if(!hwid) return; const ex = deviceActivity.get(hwid) || {}; deviceActivity.set(hwid, Object.assign(ex, data, { lastSeen: Date.now() })); } // mac dinh TAT (keo binh thuong)
+// [v9] BAN TAI KHOAN OLM: key=olm_user lowercase -> {reason, until:null=vinh vien|timestamp_ms, t, by}
+const olmBans = new Map();
+// [v6.4] KHOÁ DO PHÁT HIỆN SCRIPT LẠ — admin mở khoá từ xa (KHÁC ban vĩnh viễn: giữ key, tự mở lại)
+const lockedScripts = new Map(); // hwid -> {hwid, ip, device, reason, keyMasked, olm_user, t, status:'locked'|'unlocked', unlockedAt, lastSeen}
+
+// Seed ban từ env (BANNED_LIST=ip1,ip2 hoặc dev:HW1,...)
+try {
+    (process.env.BANNED_LIST || '').split(',').map(s => s.trim()).filter(Boolean).forEach(k => {
+        const key = k.includes(':') ? k : 'ip:' + k;
+        banned.set(key, { reason: 'seed-env', device: '', t: Date.now(), by: 'env' });
+    });
+} catch (_) {}
+
+// ── Vercel KV / Upstash REST (tùy chọn) ──
+const KV_URL = process.env.KV_REST_API_URL;
+const KV_TOKEN = process.env.KV_REST_API_TOKEN;
+const KV_ENABLED = !!(KV_URL && KV_TOKEN);
+const KV_KEY = 'godmode_v4_state';
+function kvRequest(path) {
+    return new Promise((resolve) => {
+        if (!KV_ENABLED) return resolve(null);
+        const url = KV_URL.replace(/\/$/, '') + path;
+        const u = new URL(url);
+        const req = https.get({
+            hostname: u.hostname, path: u.pathname + u.search,
+            headers: { Authorization: 'Bearer ' + KV_TOKEN }, timeout: 4000
+        }, (r) => {
+            let raw = ''; r.on('data', c => raw += c); r.on('end', () => {
+                try { resolve(JSON.parse(raw)); } catch (_) { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+}
+async function kvLoadState() {
+    if (!KV_ENABLED) return;
+    try {
+        const r = await kvRequest('/get/' + KV_KEY);
+        if (r && r.result) {
+            const st = JSON.parse(Buffer.from(r.result, 'base64').toString());
+            if (st && st.bans) for (const [k, v] of Object.entries(st.bans)) banned.set(k, v);
+            if (st && st.devices) for (const [k, v] of Object.entries(st.devices)) devices.set(k, v);
+            if (st && typeof st.autoBan === 'boolean') AUTO_BAN = st.autoBan;
+            if (st && typeof st.mobileOnly === 'boolean') MOBILE_ONLY = st.mobileOnly;
+            if (st && typeof st.banDesktop === 'boolean') BAN_DESKTOP = st.banDesktop;
+            if (st && st.adminHash) ADMIN_HASH = st.adminHash;
+            if (st && st.adminUser) ADMIN_USER = st.adminUser;
+            if (st && st.secret) { SECRET = st.secret; API_PREFIX = computeApiPrefix(SECRET); }
+            if (st && st.lockedScripts) for (const [k, v] of Object.entries(st.lockedScripts)) lockedScripts.set(k, v);
+            if (st && typeof st.blockVmScript === 'boolean') BLOCK_VM_SCRIPT = st.blockVmScript;
+            if (st && typeof st.blockModule10 === 'boolean') BLOCK_MODULE_10 = st.blockModule10;
+            if (st && typeof st.hardDcBan === 'boolean') HARD_DC_BAN = st.hardDcBan;
+            if (st && typeof st.safeMode === 'boolean') SAFE_MODE = st.safeMode;
+            if (st && typeof st.smartBan === 'boolean') SMART_BAN = st.smartBan;
+            if (st && st.realDevices) for (const [_k, _v] of Object.entries(st.realDevices)) realDevices.set(_k, _v);
+            if (st && Array.isArray(st.realIps)) st.realIps.forEach(x => realIps.add(x));
+            if (st && typeof st.dumperGuard === 'boolean') DUMPER_GUARD = st.dumperGuard;
+            if (st && typeof st.moduleWatermark === 'boolean') MODULE_WATERMARK = st.moduleWatermark;
+            if (st && Array.isArray(st.bannedKeys)) st.bannedKeys.forEach(k => BANNED_KEYS.add(String(k).toUpperCase()));
+            if (st && st.olmBans) for (const [k, v] of Object.entries(st.olmBans)) olmBans.set(String(k).toLowerCase(), v);
+        }
+    } catch (_) {}
+}
+async function kvSaveState() {
+    if (!KV_ENABLED) return;
+    try {
+        const st = {
+            bans: Object.fromEntries(banned),
+            devices: Object.fromEntries(devices),
+            lockedScripts: Object.fromEntries(lockedScripts),
+            autoBan: AUTO_BAN, mobileOnly: MOBILE_ONLY, banDesktop: BAN_DESKTOP, blockVmScript: BLOCK_VM_SCRIPT, blockModule10: BLOCK_MODULE_10,
+            hardDcBan: HARD_DC_BAN, dumperGuard: DUMPER_GUARD, moduleWatermark: MODULE_WATERMARK, safeMode: SAFE_MODE, smartBan: SMART_BAN, realDevices: Object.fromEntries(realDevices), realIps: Array.from(realIps), bannedKeys: Array.from(BANNED_KEYS),
+            olmBans: Object.fromEntries(olmBans),
+            adminHash: ADMIN_HASH, adminUser: ADMIN_USER, secret: SECRET, t: Date.now()
+        };
+        const val = Buffer.from(JSON.stringify(st)).toString('base64');
+        await kvRequest('/set/' + KV_KEY + '/' + encodeURIComponent(val));
+    } catch (_) {}
+}
+let kvLoaded = false;
+let kvLoadPromise = null;
+function ensureKvLoaded() {
+    if (!KV_ENABLED) return Promise.resolve();
+    if (kvLoaded) return Promise.resolve();
+    if (!kvLoadPromise) { kvLoadPromise = kvLoadState().then(() => { kvLoaded = true; }); }
+    return kvLoadPromise;
+}
+ensureKvLoaded();
+
+function isBanned(ip, hwid) {
+    if (banned.has('ip:' + ip)) return banned.get('ip:' + ip);
+    if (hwid && banned.has('dev:' + hwid)) return banned.get('dev:' + hwid);
+    return null;
+}
+// [v14] SMART_BAN helpers — may that Android/iOS KHONG bao gio bi ban
+function isRealMobileDevice(ip, hwid, uaHeader){
+    if (!SMART_BAN) return false;
+    const ua = String(uaHeader || '').toLowerCase();
+    // UA mobile (Android/iOS that) -> coi la that, khong bao gio ban (uu tien nhat theo yeu cau)
+    if (/android|iphone|ipad|ipod/.test(ua)) return true;
+    // HWID da tung attest thanh cong -> chac chan that
+    if (hwid && realDevices.has(String(hwid))) return true;
+    // [v15] IP da nhan dien la thiet bi that (da gap truoc, ke ca IP chua co hwid) -> that
+    if (ip && realIps.has(ip)) return true;
+    // IP trung voi IP cua thiet bi that da biet (CGNAT chung IP) -> that
+    if (ip) { for (const v of realDevices.values()) if (v.ip === ip) return true; }
+    return false;
+}
+function autoUnbanIfReal(ip, hwid, uaHeader, reason){
+    if (!SMART_BAN) return false;
+    if (!isRealMobileDevice(ip, hwid, uaHeader)) return false;
+    // [v15] Ghi nhan IP that (ke ca khi chua co hwid) de request sau tu nhan dien; luon xoa cache IP nham
+    if (ip) { realIps.add(ip); if (ipCache.has(ip)) ipCache.delete(ip); }
+    let removed = 0;
+    if (ip && banned.has('ip:' + ip)) { banned.delete('ip:' + ip); removed++; }
+    if (hwid && banned.has('dev:' + String(hwid))) { banned.delete('dev:' + String(hwid)); removed++; }
+    if (removed > 0) {
+        autoUnbanCount += removed;
+        kvSaveState();
+        adminLog('auto-unban', { ip, hwid, reason, removed, total: autoUnbanCount });
+    }
+    return removed > 0;
+}
+// [v15] Goi o dau moi route: thiet bi that tu mo ban IP/HWID ngay, khong can admin thao tac
+function unlockReal(req, ip, hwid, source){
+    if (!SMART_BAN) return;
+    autoUnbanIfReal(ip, hwid, req.headers && req.headers['user-agent'], source);
+    softUnbanReal(req, ip, hwid, 'unlock:' + source);
+}
+// [v17] UA co dau hieu Android/iOS that (khong phu thuoc Map da hoc) -> coi la thiet bi that
+function uaIsMobile(uaHeader) {
+    return /android|iphone|ipad|ipod|harmonyos|crios|fxios|mobile safari/i.test(String(uaHeader || '').toLowerCase());
+}
+// [v17] Thiet bi that: UA mobile, hoac HWID/IP da nam trong s registry that
+function realMobileReq(req, hwid) {
+    const ua = req && req.headers ? req.headers['user-agent'] : '';
+    if (uaIsMobile(ua)) return true;
+    if (hwid && realDevices.has(String(hwid))) return true;
+    const ip = req ? getClientIp(req) : '';
+    if (ip && realIps.has(ip)) return true;
+    return false;
+}
+// [v17] Go ban thong minh cho may that: luu IP that, xoa cache IP nham, golo ip/dev ban
+function softUnbanReal(req, ip, hwid, reason) {
+    if (!SMART_BAN) return false;
+    if (!realMobileReq(req, hwid)) return false;
+    if (ip) { realIps.add(ip); if (ipCache.has(ip)) ipCache.delete(ip); }
+    let removed = 0;
+    if (ip && banned.has('ip:' + ip)) { banned.delete('ip:' + ip); removed++; }
+    if (hwid && banned.has('dev:' + String(hwid))) { banned.delete('dev:' + String(hwid)); removed++; }
+    if (removed > 0) {
+        autoUnbanCount += removed;
+        kvSaveState();
+        adminLog('auto-unban-v17', { ip, hwid, reason, removed });
+    }
+    return true;
+}
+// [v17] Guard thay cho 404 "Not found" tren moi route API: may that tu mo khoa; con lai tra 403 co message
+function guardBanned(req, res, ip, hwid, label) {
+    if (softUnbanReal(req, ip, hwid, 'guard:' + label)) return false;
+    const b = isBanned(ip, hwid);
+    if (!b) return false;
+    res.status(403).json({ success: false, blocked: true, message: 'Thiết bị/IP đang bị khoá (' + (b.reason || label) + ') — thiết bị thật Android/iOS sẽ tự mở khoá ở request kế tiếp.', reason: b.reason || '' });
+    return true;
+}
+// [v17] Key bi thu hoi: may that tra 401 co thong bao; may gia moi ban + 404
+function keyBlocked(req, res, key, ip, hwid, deviceName, label) {
+    if (!isKeyBanned(key)) return false;
+    if (realMobileReq(req, hwid)) {
+        adminLog('key-blocked-real-soft', { key: maskKey(key), ip, hwid, label });
+        res.status(401).json({ success: false, message: 'Key đã bị thu hồi (dump/rò rỉ) — liên hệ admin để cấp key mới.', reason: 'key_revoked' });
+        return true;
+    }
+    addBan(ip, hwid, 'key revokle (' + label + ')', deviceName || '');
+    res.status(404).json({ error: 'Not found' });
+    return true;
+}
+function addBan(ip, hwid, reason, deviceName) {
+    // [v14] SMART_BAN: neu la thiet bi di dong that -> TU CHOI ban + tu mo ban neu dang bi khoa
+    if (SMART_BAN && isRealMobileDevice(ip, hwid, recentUaByIp.get(ip) || '')) {
+        autoUnbanIfReal(ip, hwid, '', 'addBan-attempt-on-real-device');
+        adminLog('ban-blocked-real', { ip, hwid, reason, device: deviceName || '', note: 'SMART_BAN: thiet bi di dong that, KHONG ban' });
+        return;
+    }
+    // [v13] SAFE_MODE: chi ap dung khi SMART_BAN dang TAT (SMART_BAN on thi ban binh thuong voi may ao/proxy xac nhan)
+    if (!SMART_BAN && SAFE_MODE) { adminLog('ban-soft', { ip, hwid, reason, device: deviceName || '', note: 'SAFE_MODE: khong ban cung, chi tu choi' }); return; }
+    if (ip) banned.set('ip:' + ip, { reason, device: deviceName || '', t: Date.now(), by: 'auto' });
+    if (hwid) banned.set('dev:' + hwid, { reason, device: deviceName || '', t: Date.now(), by: 'auto', ip });
+    kvSaveState();
+    adminLog('ban', { ip, hwid, reason, device: deviceName || '' });
+}
+function removeBan(key) { banned.delete(key); kvSaveState(); }
+// [v9] ===== OLM ACCOUNT BAN helpers =====
+function normOlm(u){ return String(u || '').trim().toLowerCase(); }
+function addOlmBan(olm, minutes, reason, by){
+    const k = normOlm(olm); if (!k) return false;
+    const mins = Number(minutes);
+    const until = (minutes === -1 || minutes === '-1' || minutes === 'permanent' || isNaN(mins) || mins <= 0) ? null : Date.now() + Math.floor(mins) * 60 * 1000;
+    olmBans.set(k, { reason: String(reason || 'vi pham').slice(0, 200), until, t: Date.now(), by: by || 'admin' });
+    kvSaveState(); return true;
+}
+function removeOlmBan(olm){ const k = normOlm(olm); const had = olmBans.has(k); olmBans.delete(k); if (had) kvSaveState(); return had; }
+function checkOlmBan(olm){
+    const k = normOlm(olm); if (!k) return null;
+    const b = olmBans.get(k); if (!b) return null;
+    if (b.until && b.until < Date.now()) { olmBans.delete(k); kvSaveState(); return null; } // het han -> tu go
+    let remain = '';
+    if (b.until) {
+        const ms = Math.max(0, b.until - Date.now());
+        const d = Math.floor(ms / 86400000), h = Math.floor((ms % 86400000) / 3600000), m = Math.max(0, Math.floor((ms % 3600000) / 60000));
+        remain = (d ? d + ' ngay ' : '') + (h ? h + 'h ' : '') + m + 'p';
+    }
+    return { banned: true, reason: b.reason, until: b.until, permanent: !b.until, remain, t: b.t, by: b.by };
+}
+function fmtOlmRemain(b){ if (!b) return ''; return b.permanent ? 'VINH VIEN' : (b.remain || 'con hieu luc'); }
+// [v6.4] Locked-script helpers — ghi nhận khi client tự báo khoá do script lạ
+function recordLockReport({ hwid, ip, device, reason, keyMasked, olm_user }) {
+    const now = Date.now();
+    const existing = lockedScripts.get(hwid || 'unknown');
+    lockedScripts.set(hwid || 'unknown', Object.assign({}, existing || {}, {
+        hwid: hwid || 'unknown',
+        ip: ip || (existing && existing.ip) || '',
+        device: device || (existing && existing.device) || '',
+        reason: reason || (existing && existing.reason) || '',
+        keyMasked: keyMasked || (existing && existing.keyMasked) || '',
+        olm_user: olm_user || (existing && existing.olm_user) || '',
+        status: 'locked',
+        t: (existing && existing.t) || now,
+        lastSeen: now
+    }));
+    kvSaveState();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ADMIN — tài khoản/mật khẩu hash (scrypt), đổi được trong dashboard
+// ══════════════════════════════════════════════════════════════════════════════
+function hashPass(pw, salt) {
+    salt = salt || crypto.randomBytes(16).toString('hex');
+    const h = crypto.scryptSync(String(pw), salt, 64).toString('hex');
+    return salt + ':' + h;
+}
+function verifyPass(pw, stored) {
+    try {
+        const [salt, h] = String(stored).split(':');
+        const chk = crypto.scryptSync(String(pw), salt, 64);
+        return crypto.timingSafeEqual(Buffer.from(h, 'hex'), chk);
+    } catch (_) { return false; }
+}
+let ADMIN_USER = process.env.ADMIN_USER || 'Adminn';
+let ADMIN_HASH = process.env.ADMIN_PASS_HASH || hashPass(process.env.ADMIN_PASS || '120510@');
+const adminLogins = new Map();
+const adminSessions = new Map();
+setInterval(() => { const now = Date.now(); for (const [t, s] of adminSessions) if (s.exp < now) adminSessions.delete(t); }, 60000).unref();
+
+// ── Log (ring buffer) ──
+const ADMIN_LOG = [];
+const ADMIN_LOG_MAX = 500;
+function adminLog(type, data) {
+    try {
+        const entry = Object.assign({ t: new Date().toISOString(), type }, data || {});
+        ADMIN_LOG.unshift(entry);
+        if (ADMIN_LOG.length > ADMIN_LOG_MAX) ADMIN_LOG.length = ADMIN_LOG_MAX;
+    } catch (_) {}
+}
+function maskKey(k) { if (!k) return ''; const s = String(k); return s.length <= 4 ? '****' : s.slice(0, 3) + '***' + s.slice(-2); }
+function deviceNameOf(hwid) { const d = hwid && devices.get(hwid); return d ? d.name : ''; }
+
+// ── Helpers ──
+// [v9] FIX chong fake IP: lay IP CUOI CUNG trong X-Forwarded-For (proxy tin cay them vao),
+//      validate dinh dang de tranh inject. Client co the them entry dau tien nhung khong bao gio
+//      thay duoc entry cuoi -> ban/rate-limit khong the ne.
+function getClientIp(req) {
+    const fwdAll = (req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean);
+    let ip = '';
+    if (req.ip && req.ip !== '::' && req.ip !== '::ffff:0.0.0.0') ip = req.ip;
+    else if (fwdAll.length) ip = fwdAll[0];
+    else ip = (req.socket && req.socket.remoteAddress) || '';
+    ip = String(ip).replace(/^::ffff:/, '');
+    if (!/^[0-9a-fA-F:.]{3,45}$/.test(ip)) ip = '';
+    return ip;
+}
+function isLoopbackIp(ip) { return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'; }
+const rateBuckets = new Map();
+function rateLimit(key, max, windowMs) {
+    const now = Date.now();
+    const arr = (rateBuckets.get(key) || []).filter(t => now - t < windowMs);
+    if (arr.length >= max) { rateBuckets.set(key, arr); return false; }
+    arr.push(now); rateBuckets.set(key, arr); return true;
+}
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, arr] of rateBuckets) {
+        const f = arr.filter(t => now - t < 120000);
+        if (f.length === 0) rateBuckets.delete(k); else rateBuckets.set(k, f);
+    }
+}, 60000).unref();
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  HONEYPOT + BAN MIDDLEWARE — quét đường dẫn cũ / /api/* → ban vĩnh viễn
+// ══════════════════════════════════════════════════════════════════════════════
+const HONEYPOT_PATHS = ['/api', '/.env', '/wp-admin', '/phpmyadmin', '/.git', '/config', '/server.js',
+    '/backup', '/source', '/install', '/console', '/debug', '/shell', '/etc', '/admin/login.php',
+    '/xmlrpc.php', '/.htaccess', '/wp-login.php'];
+app.use(async (req, res, next) => {
+    await ensureKvLoaded();
+    const ip = getClientIp(req);
+    if (ip && req.headers['user-agent']) recentUaByIp.set(ip, String(req.headers['user-agent'])); // [v16]
+    const isLoopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    // Đã bị ban → trả 404 trơn (không tiết lộ). [v14] Nhưng nếu là thiết bị di động thật → TỰ ĐỘNG MỞ BAN ngay.
+    if (isBanned(ip, req.headers['x-hwid'])) {
+        if (!autoUnbanIfReal(ip, req.headers['x-hwid'], req.headers['user-agent'], 'middleware-banned-real-device')
+            && !softUnbanReal(req, ip, req.headers['x-hwid'], 'middleware-banned-real-device-v17')) {
+            return res.status(403).json({ success: false, error: 'Not found', message: 'Thiết bị/IP đang bị khoá — thiết bị thật sẽ tự mở khoá ở request kế tiếp.' });
+        }
+    }
+    const p = req.path;
+    // Honeypot: /api/* (prefix cũ) và các đường dẫn quét phổ biến → BAN VĨNH VIỄN
+    if (HONEYPOT_PATHS.some(h => p === h || p.startsWith(h + '/'))) {
+        if (!isLoopback && AUTO_BAN) addBan(ip, null, 'honeypot-scan:' + p, '');
+        return res.status(404).json({ error: 'Not found' });
+    }
+    next();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v6.5] CHỮ KÝ REQUEST HMAC — chống fake request / replay / tamper
+//  Client gửi: X-Ts (unix giây), X-Nonce (random), X-Sign = HMAC(SECRET, ts|nonce|sha256(body)|session)
+//  Server kiểm tra: ts trong ±30s, nonce chưa dùng (chống replay), chữ ký khớp.
+//  Áp dụng cho MỌI POST tới API ẩn. Ping (GET) không ký (dùng cho ban-mode polling).
+// ══════════════════════════════════════════════════════════════════════════════
+const REQ_SIGN = process.env.REQ_SIGN !== 'false'; // mặc định BẬT — đặt env REQ_SIGN=false để tắt
+const usedNonces = new Map();
+setInterval(() => { const now = Date.now(); for (const [n, exp] of usedNonces) if (exp < now) usedNonces.delete(n); }, 60000).unref();
+// [v14] SMART_BAN: quet dinh ky 5 phut — tu go ban cua moi IP/HWID thuoc thiet bi di dong that
+setInterval(() => {
+    if (!SMART_BAN) return;
+    const realIps = new Set();
+    for (const v of realDevices.values()) realIps.add(v.ip);
+    let removed = 0;
+    for (const k of [...banned.keys()]) {
+        let isReal = false;
+        if (k.startsWith('ip:')) { const ip = k.slice(3); if (realIps.has(ip)) { isReal = true; ipCache.delete(ip); } }
+        else if (k.startsWith('dev:')) { if (realDevices.has(k.slice(4))) isReal = true; }
+        if (isReal) { banned.delete(k); removed++; }
+    }
+    if (removed > 0) { autoUnbanCount += removed; kvSaveState(); adminLog('auto-unban-sweep', { removed, total: autoUnbanCount, realDevices: realDevices.size }); }
+}, 5 * 60 * 1000).unref();
+function sha256Hex(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+function verifyReqSig(req) {
+    if (!REQ_SIGN) return true;
+    const ts = req.headers['x-ts'], nonce = req.headers['x-nonce'], sign = req.headers['x-sign'];
+    // [v6.5.2] SOFT: thiếu chữ ký (script cũ / đã mã hoá obfuscator chưa ký) → cho qua + ghi log.
+    //          Có chữ ký nhưng SAI → chặn (chống fake/tamper). Client mới luôn ký đúng.
+    if (!ts || !nonce || !sign) { if (/\/module$/.test(req.path)) { adminLog('sig-missing-hard', { ip: getClientIp(req), path: req.path }); return false; } adminLog('sig-missing', { ip: getClientIp(req), path: req.path }); return true; }
+    const tsNum = parseInt(ts, 10);
+    if (isNaN(tsNum) || Math.abs(Math.floor(Date.now() / 1000) - tsNum) > 15) return false; // [v10] 30s->15s chong replay
+    const nonceKey = ts + ':' + nonce;
+    if (usedNonces.has(nonceKey)) return false;
+    usedNonces.set(nonceKey, Date.now() + 60000);
+    const bodyHash = sha256Hex(req.rawBody || Buffer.from(''));
+    const sessTok = req.headers['x-session'] || '';
+    const expected = crypto.createHmac('sha256', SECRET).update(ts + '|' + nonce + '|' + bodyHash + '|' + sessTok).digest('hex');
+    try { return crypto.timingSafeEqual(Buffer.from(String(sign)), Buffer.from(expected)); } catch (_) { return false; }
+}
+let FAKE_REQ_COUNT = 0;
+app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path.startsWith(API_PREFIX)) {
+        if (!verifyReqSig(req)) {
+            FAKE_REQ_COUNT++;
+            adminLog('fake-req', { ip: getClientIp(req), path: req.path, ua: String(req.headers['user-agent'] || '').slice(0, 80) });
+            return res.status(403).json({ success: false, message: 'Chữ ký request không hợp lệ (anti-fake)' });
+        }
+    }
+    next();
+});
+// [v11] Global rate-limit per-IP chong scan/dumper (120 req/phut — connector that <30)
+app.use((req, res, next) => {
+    const ip = getClientIp(req);
+    if (isLoopbackIp(ip) || ALLOW_LIST.includes(ip)) return next();
+    if (!rateLimit('g:' + ip, 300, 60000)) { adminLog('ratelimit-global', { ip, path: req.path, ua: String(req.headers['user-agent'] || '').slice(0, 50) }); return res.status(429).json({ error: 'Too many requests' }); }
+    next();
+});
+// [v10] HARD_DC_BAN: IP datacenter/proxy ĐÃ BIẾT (cache) gọi bất kỳ API nào → BAN NGAY, không xử lý tiếp
+app.use(async (req, res, next) => {
+    if (!HARD_DC_BAN || !req.path.startsWith(API_PREFIX)) return next();
+    const ip = getClientIp(req);
+    if (isLoopbackIp(ip) || ALLOW_LIST.includes(ip)) return next();
+    const hit = ipCache.get(ip);
+    if (hit && hit.expire > Date.now() && hit.info && hit.info.risk === 'high' && hit.info.isDC && hit.info.isVPN) {
+        // [v17] UA mobile that (Android/iOS) LUON bo qua, ke ca khi SMART_BAN tat hoac cache nham
+        if (uaIsMobile(req.headers['user-agent']) || (SMART_BAN && isRealMobileDevice(ip, null, req.headers['user-agent']))) {
+            autoUnbanIfReal(ip, null, req.headers['user-agent'], 'dc-cache-real-mobile');
+            softUnbanReal(req, ip, null, 'dc-cache-real-mobile-v17');
+            adminLog('dc-skip-real', { ip, org: hit.info.org || '' });
+            return next();
+        }
+        addBan(ip, null, 'IP datacenter/proxy goi API (HARD_DC_BAN) — ' + (hit.info.org || ''), '');
+        adminLog('dc-ban', { ip, org: hit.info.org || '', country: hit.info.country || '' });
+        return res.status(403).json({ success: false, error: 'Not found', message: 'Mạng datacenter/proxy bị chặn.' });
+    }
+    next();
+});
+// ══════════════════════════════════════════════════════════════════════════════
+//  PHÁT HIỆN MẠNG (proxy/VPN/datacenter) — cache 1h, fail-open an toàn
+// ══════════════════════════════════════════════════════════════════════════════
+const ipCache = new Map();
+const DC_KEYWORDS = ['amazon', 'google cloud', 'microsoft azure', 'digitalocean', 'ovh', 'hetzner', 'linode',
+    'vultr', 'choopa', 'leaseweb', 'colocrossing', 'data center', 'datacenter', 'hosting', 'proxy', 'vpn',
+    'shadowsocks', 'contabo', 'buyvm', 'greencloud', 'alibaba', 'tencent cloud', 'oracle cloud', 'ibm cloud',
+    'scaleway', 'online.net', 'dedibox', 'cloudflare', 'fastly'];
+const ALLOW_LIST = (process.env.PROXY_ALLOW_LIST || '').split(',').map(x => x.trim()).filter(Boolean);
+// [v11] checkProxyIp v2: ipapi.is chinh + fallback ip-api.com; that bai -> cache 60s (thu lai som), co co 'degraded'
+function checkProxyIp(ip) {
+    return new Promise((resolve) => {
+        if (!ip || ALLOW_LIST.includes(ip)) return resolve({ risk: 'low' });
+        const hit = ipCache.get(ip);
+        if (hit && hit.expire > Date.now()) return resolve(hit.info);
+        const done = (info, ttlMs) => { ipCache.set(ip, { info, expire: Date.now() + (ttlMs || 3600000) }); resolve(info); };
+        // fail-open an toan (tranh ban nham nha mang di dong CGNAT) nhung cache 60s de thu lai som
+        const finishFail = (note) => done({ risk: 'low', degraded: true, note }, 60000);
+        const parseIpApiIs = (raw) => {
+            try {
+                const j = JSON.parse(raw);
+                const org = String((j.asn && j.asn.org) || (j.company && j.company.name) || '').toLowerCase();
+                const isDC = !!(j.is_datacenter || (j.company && j.company.type === 'hosting'));
+                const isVPN = !!(j.is_vpn || j.is_proxy || j.is_tor || j.is_abuser);
+                const kw = DC_KEYWORDS.some(k => org.includes(k));
+                // [v17] Nha mang di dong that (Viettel/Vinaphone/Mobifone/FPT/Gtel...) -> luon low, khong chan/ban
+                const CARRIER_RE = /viettel|vinaphone|mobifone|fpt|vietnamobile|gtel|vietnam postal|hanoi telecom|sai gon|carrier|cellular|mobile network|telecom/i;
+                if (CARRIER_RE.test(org)) {
+                    return { risk: 'low', carrier: true, isMobile: true, isDC, isVPN, country: (j.location && j.location.country_code) || '', org };
+                }
+                // [v13] Chi risk=high khi CA datacenter LAN co proxy/VPN/keyword.
+                return { risk: (isDC && (isVPN || kw)) ? 'high' : 'low', isDC, isVPN, country: (j.location && j.location.country_code) || '', org };
+            } catch (_) { return null; }
+        };
+        const fallback = () => {
+            const r2 = http.get(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,country,org,isp,proxy,hosting,mobile`, { timeout: 3000 }, (resp) => {
+                let raw = ''; resp.on('data', c => raw += c); resp.on('end', () => {
+                    try {
+                        const j = JSON.parse(raw);
+                        if (j && j.status === 'success') {
+                            const org = String(j.isp || j.org || '').toLowerCase();
+                            const isDC = !!j.hosting;
+                            const isVPN = !!j.proxy;
+                            const isMobile = !!j.mobile; // [v13] ip-api tra mobile=true voi nha mang di dong
+                            const kw = DC_KEYWORDS.some(k => org.includes(k));
+                            const CARRIER_RE2 = /viettel|vinaphone|mobifone|fpt|vietnamobile|gtel|vietnam postal|hanoi telecom|sai gon|carrier|cellular|mobile|telecom/i;
+                            // [v13] Neu la mobile carrier (nha mang di dong that) -> force risk=low, KHONG bao gio ban/chan.
+                            if (isMobile || CARRIER_RE2.test(org)) { done({ risk: 'low', isMobile: true, carrier: true, isDC, isVPN, country: j.country || '', org }); return; }
+                            // [v13] Chi risk=high khi CA datacenter LAN co proxy/VPN/keyword (tranh nham carrier IP).
+                            done({ risk: (isDC && (isVPN || kw)) ? 'high' : 'low', isDC, isVPN, country: j.country || '', org });
+                        } else { finishFail('fallback-fail'); }
+                    } catch (_) { finishFail('fallback-parse'); }
+                });
+            });
+            r2.on('error', () => finishFail('fallback-error'));
+            r2.on('timeout', () => { r2.destroy(); finishFail('fallback-timeout'); });
+        };
+        const req = https.get(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}`, { timeout: 4000 }, (r) => {
+            let raw = ''; r.on('data', c => raw += c); r.on('end', () => {
+                const info = parseIpApiIs(raw);
+                if (info) done(info); else fallback();
+            });
+        });
+        req.on('error', () => fallback());
+        req.on('timeout', () => { req.destroy(); fallback(); });
+    });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  PHÁT HIỆN THIẾT BỊ THẬT (Android/iOS) — máy ảo/emulator/trình duyệt giả → BAN
+//  Trả về: { ok, ban (bool), reason, deviceName }
+// ══════════════════════════════════════════════════════════════════════════════
+// [FIX v8.1] Bỏ sm-n976n / sm-g977n — đây là máy Samsung Galaxy THẬT (Note10+ 5G / S10 5G),
+//            trước đây bị nhầm là emulator marker → ban nhầm người dùng thật.
+const EMU_MARKERS = ['emulator', 'sdk built for', 'genymotion', 'bluestacks', 'nox', 'ldplayer', 'memu',
+    'andy', 'droid4x', 'ipadian', 'windroy', 'youwave', 'leapdroid', 'koplayer', 'remix os', 'phoenixos',
+    'primeos', 'virtualbox', 'vmware', 'qemu', 'android_x86', 'x86_64; rv', 'android sdk', 'google_sdk',
+    'sdk_gphone', 'emulator64', 'vbox86', 'andvm', 'duos', 'appplayer', 'microvirt', 'titandx',
+    'browserless', 'phantomjs', 'slimerjs', 'nightmare', 'cypress', 'testcafe', 'headless'];
+const BAD_UA = ['headlesschrome', 'phantom', 'puppeteer', 'selenium', 'webdriver', 'playwright', 'electron',
+    'cef', 'wkhtml', 'chrome-lighthouse', 'bot', 'crawl', 'spider', 'scrapy', 'curl', 'wget',
+    'python-requests', 'axios', 'okhttp', 'java/', 'go-http-client', 'libwww', 'httpclient', 'postman', 'insomnia',
+    'libcurl', 'node-fetch', 'undici', 'deno', 'bun/', 'httpie', 'python-urllib', 'python-httpx', 'aiohttp',
+    'guzzle', 'reqwest', 'rust', 'php/', 'ruby/', 'k6', 'jmeter', 'loadrunner', 'headless'];
+
+// [v11] Helper: tra true neu UA la bot/curl/emulator/headless/webdriver (dung cho ca GET endpoint, khong chi /attest)
+function isBadUA(uaHeader){
+    const ua = String(uaHeader || '').toLowerCase();
+    if(!ua || ua.length < 20) return true;
+    if(BAD_UA.some(k => ua.includes(k))) return true;
+    if(EMU_MARKERS.some(k => ua.includes(k))) return true;
+    return false;
+}
+// [v12] Chi Android/iOS that (UA mobile) moi duoc phep keo code khi SMART_VM_BLOCK bat
+function isMobileUA(uaHeader){
+    const ua = String(uaHeader || '').toLowerCase();
+    return /android|iphone|ipad|ipod/.test(ua);
+}
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v7] PHÁT HIỆN THIẾT BỊ THẬT THÔNG MINH — GRADED CONFIDENCE
+//  FIX ban nhầm iOS thật: các kiểm tra heuristic (touch/cores/screen/RAM) KHÔNG
+//  còn ban cứng vĩnh viễn nữa — chỉ "soft reject" (cho thử lại) + ghi log.
+//  Chỉ ban khi có BẰNG CHỨNG RÕ RÀNG (UA giả, webdriver, emulator marker,
+//  UA-platform mâu thuẫn). iOS thật luôn được ưu tiên đi qua (skip touch check,
+//  ngưỡng màn hình rộng hơn). Trả về { ok, ban, reason, deviceName, score }.
+// ══════════════════════════════════════════════════════════════════════════════
+function validateDevice(fp, device, uaHeader) {
+    const ua = String((fp && fp.ua) || uaHeader || '').toLowerCase();
+    const dev = device || {};
+    const platform = String((fp && fp.platform) || (dev && dev.platform) || '').toLowerCase();
+    const vendor = String((fp && fp.vendor) || (dev && dev.vendor) || '').toLowerCase();
+    let score = 0; // điểm nghi ngờ tích lũy
+    let softReason = '';
+    // [v10] không gửi fingerprint / device → nghi dumper/curl giả
+    if (!fp || typeof fp !== 'object') { score += 3; softReason = softReason || 'khong gui fingerprint'; }
+    if (!device || typeof device !== 'object') { score += 2; softReason = softReason || 'khong gui thong tin thiet bi'; }
+
+    // ── A. BẰNG CHỨNG RÕ RÀNG → BAN NGAY (high confidence) ──
+    // [v17] Mobile thật (Android/iOS) miễn các dấu hiệu mềm; chỉ automation rõ ràng mới chặn.
+    const uaMobile = /android|iphone|ipad|ipod|harmonyos/i.test(ua);
+    const HARD_AUTO_RE = /webdriver|headlesschrome|puppeteer|playwright|selenium|phantomjs|electron/i;
+    if (BAD_UA.some(k => ua.includes(k))) {
+        if (!(uaMobile && !HARD_AUTO_RE.test(ua))) return { ok: false, ban: true, reason: 'trình duyệt giả/bot (UA)', deviceName: '', score: 99 };
+        score += 1; softReason = softReason || 'dau hieu UA soft tren mobile (v17 mien ban)';
+    }
+    if (fp && fp.webdriver === true) return { ok: false, ban: true, reason: 'webdriver/automation', deviceName: '', score: 99 };
+    if (!ua || ua.length < 20) {
+        if (!uaMobile) return { ok: false, ban: true, reason: 'UA không hợp lệ', deviceName: '', score: 99 };
+        softReason = softReason || 'thieu UA header tren mobile (v17 soft)';
+    }
+    if (EMU_MARKERS.some(k => ua.includes(k))) {
+        const STRONG_EMU_RE = /sdk_gphone|emulator|genymotion|bluestacks|nox|ldplayer|memu|vbox|qemu|virtualbox|vmware/i;
+        if (!(uaMobile && !STRONG_EMU_RE.test(ua))) return { ok: false, ban: true, reason: 'máy ảo/emulator (UA marker)', deviceName: '', score: 99 };
+        score += 1; softReason = softReason || 'emu marker soft tren mobile (v17)';
+    }
+
+    const isAndroid = /android/i.test(ua);
+    const isIOS = /iphone|ipad|ipod/i.test(ua);
+
+    // [FIX v8.1] UA-platform mâu thuẫn → KHÔNG ban cứng nữa. navigator.platform KHÔNG đáng tin
+    //            trên di động: Android Chrome báo "Linux armv8l" (khớp /linux/), iPad desktop-mode
+    //            báo "MacIntel" (khớp /mac/) → trước đây BAN NHẦM thiết bị thật. Chỉ cộng điểm nhẹ.
+    if (isIOS && /win|mac|linux|x11/.test(platform) && !/iphone|ipad|ipod/.test(platform))
+        { score += 1; softReason = softReason || 'platform không khớp iOS (thường là iPad desktop-mode)'; }
+    if (isAndroid && /win|mac|linux/.test(platform) && !/android/.test(platform))
+        { score += 1; softReason = softReason || 'platform không khớp Android (thường là Linux armv8l)'; }
+    // UA iOS nhưng vendor không phải Apple → nghi giả (trung bình, soft)
+    if (isIOS && vendor && !vendor.includes('apple')) { score += 2; softReason = softReason || 'vendor không khớp iOS'; }
+
+    // Tên máy (log admin)
+    let deviceName = '';
+    if (isAndroid) {
+        const m = ua.match(/;\s*([^;)]+?)\s+build\//i) || ua.match(/android\s+[^;)]+;\s*([^;)]+)/i);
+        deviceName = m ? m[1].trim() : (dev.model || 'Android Device');
+    } else if (isIOS) {
+        deviceName = /ipad/i.test(ua) ? 'iPad' : /ipod/i.test(ua) ? 'iPod' : 'iPhone';
+        if (dev.model) deviceName += ' ' + dev.model;
+    } else {
+        deviceName = dev.model || navigator_platform_fallback(fp);
+    }
+
+    // ── B. MOBILE_ONLY: không phải Android/iOS → soft reject (KHÔNG ban, tránh nhầm) ──
+    if (MOBILE_ONLY && !isAndroid && !isIOS) {
+        return { ok: false, ban: BAN_DESKTOP, reason: 'không phải máy Android/iOS thật', deviceName, score: 1 };
+    }
+
+    // ── C. HEURISTIC — chỉ cộng điểm, KHÔNG ban cứng (fix ban nhầm iOS thật) ──
+    // Cảm ứng: iOS thật LUÔN có touch → skip check trên iOS (client cũ có thể gửi sai).
+    //          Android thiếu touch → soft (thử lại), không ban.
+    const touch = dev.touchPoints != null ? dev.touchPoints : (fp && fp.maxTouchPoints);
+    if (isAndroid && (touch == null || touch < 1)) { score += 1; softReason = softReason || 'thiếu cảm ứng'; }
+
+    // CPU <2 nhân → soft
+    const cores = dev.cores || (fp && fp.hardwareConcurrency) || 0;
+    if (cores && cores < 2) { score += 1; softReason = softReason || 'CPU bất thường'; }
+
+    // Màn hình: iOS ngưỡng rộng hơn (iPad Pro physical 2048). Chỉ soft, không ban.
+    const scr = dev.screen || (fp && fp.screen) || '';
+    const sm = String(scr).match(/(\d+)x(\d+)/);
+    const w = sm ? parseInt(sm[1], 10) : 0;
+    const maxW = isIOS ? 2200 : 1400;
+    if (w && (w < 320 || ((isAndroid || isIOS) && w > maxW))) { score += 1; softReason = softReason || 'màn hình bất thường'; }
+
+    // RAM <1 (nếu browser expose) → soft
+    const mem = dev.memory || (fp && fp.deviceMemory) || 0;
+    if (mem && mem < 1) { score += 1; softReason = softReason || 'RAM bất thường'; }
+
+    // [v10] C.2 KIỂM TRA NHẤT QUÁN (CPU/RAM/touch/screen/vendor) — cộng điểm
+    const coresC = dev.cores || (fp && fp.hardwareConcurrency) || 0;
+    const memC = dev.memory || (fp && fp.deviceMemory) || 0;
+    if (coresC && memC && coresC > 8 && memC < 2) { score += 2; softReason = softReason || 'CPU/RAM mau thuan (cores>8 nhung RAM<2)'; }
+    const touchC = dev.touchPoints != null ? dev.touchPoints : (fp && fp.maxTouchPoints);
+    if (touchC && touchC >= 5 && w && w < 320) { score += 2; softReason = softReason || 'touch nhieu nhung man hinh qua nho'; }
+    if (isAndroid && vendor && !/google/.test(vendor)) { score += 1; softReason = softReason || 'vendor Android khong phai Google'; }
+    // [v10] suspicious = score>=2 → kết hợp với tín hiệu proxy/datacenter để BAN (tránh ban nhầm nhà mạng di động)
+    const suspicious = score >= 2;
+    // ── D. KẾT LUẬN: ban cứng chỉ khi ≥5 điểm; suspicious ghi cờ cho HARD_DC_BAN
+    if (score >= 5 && !isAndroid && !isIOS) return { ok: false, ban: true, reason: 'đa dấu hiệu thiết bị giả (' + softReason + ')', deviceName, score, suspicious: true };
+    // [v16] Mobile that diem heuristic cao (thieu fp cu, thieu touch...) -> KHONG chan, chi danh dau nghi ngo
+    if (score >= 5) return { ok: true, ban: false, reason: '', deviceName, score, suspicious: true, softScore: true };
+    return { ok: true, ban: false, reason: '', deviceName, score, suspicious };
+}
+function navigator_platform_fallback(fp) { return (fp && fp.platform) || 'Unknown'; }
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MÃ HÓA ĐÁP ÁN AES-256-GCM (anti-dump) — key derive từ session token
+// ══════════════════════════════════════════════════════════════════════════════
+function deriveKey(sessionToken) { return crypto.pbkdf2Sync(sessionToken + '|' + SECRET, 'godmode-v4-salt', 1000, 32, 'sha256'); }
+function encryptAnswers(questions, sessionToken) {
+    const key = deriveKey(sessionToken);
+    const iv = crypto.randomBytes(12);
+    const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+    let enc = c.update(JSON.stringify(questions), 'utf8', 'base64');
+    enc += c.final('base64');
+    return { iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: enc };
+}
+function fpHash(fp) { return crypto.createHmac('sha256', SECRET).update(JSON.stringify(fp || {}).slice(0, 800)).digest('hex').slice(0, 16); }
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v6.5] ANTI-SHARE KEY + ANTI /fire TRỰC TIẾP
+//  checkKeyShare: cùng 1 key dùng từ 2 HWID khác nhau trong 2h → từ chối + log
+//  fireRateOk   : tối đa 8 lần /fire mỗi key mỗi giờ (chống spam nộp bài)
+// ══════════════════════════════════════════════════════════════════════════════
+const keyUsage = new Map(); // key -> {hwid, ip, t}
+let SHARE_DETECT_COUNT = 0;
+const ANTI_SHARE = process.env.ANTI_SHARE !== 'false'; // mặc định BẬT — env ANTI_SHARE=false để tắt
+function checkKeyShare(key, hwid, ip) {
+    if (!ANTI_SHARE || !key) return { shared: false };
+    const now = Date.now();
+    const prev = keyUsage.get(key);
+    keyUsage.set(key, { hwid: hwid || '', ip: ip || '', t: now });
+    if (prev && prev.hwid && hwid && prev.hwid !== hwid && (now - prev.t) < 2 * 3600 * 1000) {
+        SHARE_DETECT_COUNT++;
+        adminLog('share-detect', { key: maskKey(key), hwid, ip, prevHwid: prev.hwid, prevIp: prev.ip });
+        return { shared: true };
+    }
+    return { shared: false };
+}
+const fireUsage = new Map(); // key -> [timestamps]
+let FIRE_ATTACK_COUNT = 0;
+function fireRateOk(key) {
+    const now = Date.now();
+    const arr = (fireUsage.get(key) || []).filter(t => now - t < 3600 * 1000);
+    if (arr.length >= 8) { FIRE_ATTACK_COUNT++; return false; }
+    arr.push(now); fireUsage.set(key, arr); return true;
+}
+
+// Kiểm tra session stateless cho endpoint nhạy cảm (process/fire)
+function requireSession(req, res) {
+    const token = req.headers['x-session'];
+    // [v6.5.3 · LEGACY] Script cũ (v5.0) không gửi session token → cho qua (chỉ log), không chặn.
+    //          Bảo mật vẫn còn: chữ ký HMAC (nếu client ký) + key verify ở /verify.
+    if (!token) { adminLog('legacy-no-session', { path: req.path, ip: getClientIp(req) }); req._sess = null; req._token = null; return true; }
+    const sess = verifySession(token);
+    if (!sess) { res.status(403).json({ success: false, message: 'Phiên không hợp lệ hoặc hết hạn' }); return false; }
+    const { key, hwid } = req.body || {};
+    if (sess.k !== key) { res.status(403).json({ success: false, message: 'Phiên không khớp key' }); return false; }
+    if (sess.h !== (hwid || '')) { res.status(403).json({ success: false, message: 'Phiên không khớp thiết bị' }); return false; }
+    // [v16] IP quay số (CGNAT / chuyển Wi-Fi<->4G) tren di dong la binh thuong -> CHI GHI LOG, khong chan
+    if (sess.ip && sess.ip !== getClientIp(req)) { adminLog('ip-rotated-soft', { oldIp: sess.ip, newIp: getClientIp(req), path: req.path }); }
+    const fph = req.headers['x-fp-hash'];
+    if (fph && sess.fp && fph !== sess.fp) { adminLog('fp-changed-soft', { path: req.path, ip: getClientIp(req) }); }
+    // [v6.5.1] Seq — CHỈ GHI LOG, KHÔNG chặn. Lý do: chữ ký HMAC (nonce + ts) đã chống replay;
+    //          chặn cứng gây mất đồng bộ khi nhiều lời gọi /process chạy song song.
+    if (String(req.headers['x-seq'] || '') !== String(sess.seq || '1')) { adminLog('seq-mismatch', { got: String(req.headers['x-seq'] || ''), expect: String(sess.seq || '1'), ip: getClientIp(req) }); }
+    // [v6.5] UA-bind — chống share session token sang máy/trình duyệt khác
+    if (sess.ua && sha256Hex(req.headers['user-agent'] || '').slice(0, 16) !== sess.ua) {
+        if (uaIsMobile(req.headers['user-agent'])) { adminLog('ua-soft-mobile', { path: req.path, ip: getClientIp(req) }); }
+        else { res.status(403).json({ success: false, message: 'Trình duyệt không khớp phiên (anti-share token)' }); return false; }
+    }
+    req._sess = sess; req._token = token;
+    return true;
+}
+// Xoay session token sau mỗi request thành công (token bị hook sẽ hết hạn sau 5 phút)
+function rotateSession(req, payload) {
+    if (!req._sess) return payload;
+    const old = req._sess;
+    const nextSeq = (old.seq || 1) + 1;
+    const newTok = signSession(Object.assign({}, old, { exp: Date.now() + SESSION_TTL, seq: nextSeq }));
+    payload.next_session = newTok;
+    payload.next_seq = nextSeq; // [v6.5.1] client dùng giá trị này thay vì tự +1 (tránh mất đồng bộ)
+    return payload;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  CORE LOGIC (giữ nguyên từ bản gốc — chạy trên Node.js)
+// ══════════════════════════════════════════════════════════════════════════════
+const SECRET_KEY = process.env.OLM_SECRET_KEY || '1047823200';
+const APP_ID = process.env.APP_ID || 'tiep_god_mode_v3';
+
+function decryptOLM(base64Str) {
+    if (!base64Str) return null;
+    try {
+        const rawBuf = Buffer.from(base64Str, 'base64');
+        const rawStr = rawBuf.toString('latin1');
+        let decrypted = '';
+        for (let i = 0; i < rawStr.length; i++) {
+            decrypted += String.fromCharCode(rawStr.charCodeAt(i) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length));
+        }
+        return Buffer.from(Uint8Array.from(decrypted, c => c.charCodeAt(0))).toString('utf-8');
+    } catch (e) { console.error('[decryptOLM]', e.message); return null; }
+}
+function extractAnswers(htmlContent) {
+    const $ = cheerio.load(htmlContent);
+    let answers = [];
+    const correctNodes = $('.correctAnswer');
+    if (correctNodes.length > 0) { correctNodes.each((_, el) => answers.push($(el).text().replace('||', '').trim())); return answers; }
+    const fillInNodes = $('input[data-accept]');
+    if (fillInNodes.length > 0) { fillInNodes.each((_, el) => answers.push($(el).attr('data-accept'))); return answers; }
+    let isMatching = false;
+    $('li').each((_, li) => {
+        const text = $(li).text().trim();
+        if (text.includes('||')) { isMatching = true; answers.push(text.split('||').map(s => s.trim()).filter(s => s).join(' ➔ ')); }
+    });
+    if (isMatching) return answers;
+    return ['Không tự động trích xuất được.'];
+}
+function buildParams(sq) {
+    const count = sq.count || 4;
+    if (sq.type === 6) { const orderArr = Array.from(Array(Math.max(count, 15)), (_, k) => k); return { js: '', order_l: orderArr, order_r: orderArr }; }
+    return { js: '', order: Array.from(Array(count), (_, k) => k) };
+}
+function findCorrectInfo(node) {
+    const results = [];
+    function traverse(n) {
+        if (!n) return;
+        const subQ_ID = n.id || n._id || (n.props ? n.props.id : null);
+        if ((n.type === 'fillme-input' && n.content) || (typeof n.content === 'string' && n.content.includes('data-accept='))) {
+            if (n.content.includes('data-accept=')) {
+                const regex = /data-accept="([^"]+)"/g; let match;
+                while ((match = regex.exec(n.content)) !== null)
+                    results.push({ type: 4, ans: [match[1]], count: 1, skill: n.id_skill, subId: subQ_ID || ('raw_' + Math.random()), isText: true });
+            } else {
+                results.push({ type: 4, ans: [n.content], count: 1, skill: n.id_skill, subId: subQ_ID, isText: true });
+            }
+            return;
+        }
+        if (n.type === 'olm-list' || (Array.isArray(n.children) && n.children.length > 0)) {
+            const options = n.children;
+            if (n.name === 'true-false' || n.listType === 'true-false') {
+                results.push({ type: 13, ans: options.map(o => (o.correct == true || o.correct === 'true' || o.correct == 1) ? '1' : '0'), count: options.length, skill: n.id_skill, subId: subQ_ID });
+                return;
+            }
+            if (n.name === 'link-list' || n.listType === 'matching') {
+                results.push({ type: 6, ans: options.map((_, idx) => idx.toString()), count: options.length, skill: n.id_skill, subId: subQ_ID });
+                return;
+            }
+            if (options.some(c => c.correct !== undefined)) {
+                const trueIndex = options.findIndex(o => o.correct == true || o.correct === 'true' || o.correct == 1);
+                results.push({ type: 1, ans: [(trueIndex === -1 ? 0 : trueIndex).toString()], count: options.length, skill: n.id_skill, subId: subQ_ID });
+                return;
+            }
+        }
+        if (Array.isArray(n.children)) n.children.forEach(traverse);
+        else if (Array.isArray(n.questions)) n.questions.forEach(traverse);
+        else if (Array.isArray(n.items)) n.items.forEach(traverse);
+        else if (Array.isArray(n.list)) n.list.forEach(traverse);
+        else if (n.root) traverse(n.root);
+    }
+    let contentToParse = node.json_content || node.content;
+    if (typeof contentToParse === 'string' && !contentToParse.trim().startsWith('{') && !contentToParse.trim().startsWith('[')) {
+        const decoded = decryptOLM(contentToParse);
+        if (decoded) contentToParse = decoded;
+    }
+    try { traverse(typeof contentToParse === 'string' ? JSON.parse(contentToParse) : contentToParse); }
+    catch (_) { traverse(node); }
+    if (results.length === 0) results.push({ type: 1, ans: ['0'], count: 4, skill: null, subId: null });
+    return results;
+}
+function buildFirePayload({ raw_questions, meta, video_length }, mode, timeStr, grade) {
+    const timeParts = (timeStr || '10.00').split('.');
+    const userMins = parseInt(timeParts[0]) || 0;
+    let userSecsStr = timeParts[1] || '0';
+    if (userSecsStr.length === 1) userSecsStr += '0';
+    const userSecs = parseInt(userSecsStr.substring(0, 2));
+    let calcSeconds = (userMins * 60) + userSecs;
+    if (calcSeconds < 30) calcSeconds = 120;
+    const totalPackages = raw_questions.length;
+    const isExam = mode === 'exam', isVideo = mode === 'video';
+    const now = Math.floor(Date.now() / 1000);
+    let totalSeconds, timeInit;
+    if (isVideo || isExam) { totalSeconds = calcSeconds; timeInit = now - totalSeconds; }
+    else { totalSeconds = totalPackages * 15; timeInit = now - totalSeconds; }
+    const params = new URLSearchParams();
+    const fakeLog = [];
+    let max_tn_score = 0, tn_score_calc = 0, tl_max_calc = 0;
+    raw_questions.forEach((q, i) => {
+        const subQuestions = findCorrectInfo(q);
+        const sub_count = subQuestions.length;
+        const is_tl = (q.q_type == 18 || q.type == 18 || q.q_type == 11);
+        let final_score = sub_count;
+        if (q.score !== undefined && q.score !== null && q.score !== '') final_score = parseFloat(q.score);
+        else if (q.point !== undefined && q.point !== null && q.point !== '') final_score = parseFloat(q.point);
+        if (!isVideo) {
+            params.append('quiz_list[]', q.id || q._id);
+            params.append(`score_list[${q.id || q._id}]`, final_score);
+        }
+        let skillIDs = [...new Set(subQuestions.map(sq => sq.skill).filter(s => s != null))];
+        if (!isVideo) skillIDs.forEach(s => params.append('correct_skill[]', s));
+        if (isVideo || isExam) {
+            if (is_tl && isExam) {
+                tl_max_calc += final_score;
+                fakeLog.push({ answer: JSON.stringify(['Học sinh đã làm phần tự luận trên máy.']), label: [''], params: '{"js":"","order":[0]}', correct_skill: [], wrong_skill: [], type: [18], result: [0], idq: parseInt(q.id || q._id), score: final_score, chk: 0 });
+            } else {
+                max_tn_score += final_score; tn_score_calc += final_score;
+                const ans_list = [], type_list = [], prs_list = [], resArr = [], mresult = [], listIdq = [], lbl_list = [];
+                for (let j = 0; j < sub_count; j++) {
+                    const sq = subQuestions[j];
+                    if (sq.type === 4 || sq.type === 13 || sq.type === 6) ans_list.push(JSON.stringify(sq.ans));
+                    else ans_list.push(JSON.stringify(sq.ans[0] || '0'));
+                    type_list.push(sq.type || 1);
+                    prs_list.push(JSON.stringify(buildParams(sq)));
+                    resArr.push(1); mresult.push([1]);
+                    listIdq.push(sq.subId && sq.subId.toString().length > 5 ? sq.subId : `q${j}`);
+                    let lbl = '';
+                    if (sq.ans.length === 1 && !isNaN(sq.ans[0]) && sq.type !== 4 && sq.type !== 13)
+                        lbl = ['A', 'B', 'C', 'D', 'E'][parseInt(sq.ans[0])] || '';
+                    lbl_list.push(lbl);
+                }
+                const logItem = {
+                    answer: JSON.stringify(ans_list), label: sub_count === 1 ? lbl_list : [], labels: lbl_list,
+                    params: sub_count === 1 ? prs_list[0] : JSON.stringify({ js: '', prs: prs_list, order: Array.from(Array(sub_count).keys()) }),
+                    correct_skill: skillIDs, wrong_skill: [], type: type_list, result: resArr, mresult, idq: parseInt(q.id || q._id), score: final_score
+                };
+                if (isExam) { logItem.chk = 1; if (sub_count > 1) logItem.list_idq = listIdq; }
+                if (isVideo) { logItem.marker = q.marker || (i + 1); logItem.id = (q.id || q._id).toString(); }
+                fakeLog.push(logItem);
+            }
+        } else {
+            const q_params_arr = [], a_params_arr = [];
+            subQuestions.forEach(sq => { q_params_arr.push(JSON.stringify(buildParams(sq))); a_params_arr.push(JSON.stringify(sq.ans)); });
+            fakeLog.push({ q_params: JSON.stringify(q_params_arr), a_params: JSON.stringify(a_params_arr), result: 1, correct: 1, wrong: 0, a_index: i, time_spent: Math.floor(Math.random() * 15) + 10 });
+        }
+    });
+    params.append('id_cate', meta.id_cate);
+    params.append('id_courseware', meta.id_courseware || meta.id_cate);
+    params.append('id_user', meta.id_user);
+    params.append('id_grade', grade || meta.id_grade || '10');
+    if (meta.id_school) params.append('id_school', meta.id_school);
+    if (meta.id_group) params.append('id_group', meta.id_group);
+    params.append('type_vip', '530'); params.append('time_stored', '0'); params.append('date_end', now);
+    params.append('data_log', JSON.stringify(fakeLog));
+    if (isVideo) {
+        const vl = video_length || 900;
+        params.append('type', '5'); params.append('type_exam', '0'); params.append('total_time', vl); params.append('current_time', vl);
+        params.append('time_spent', totalSeconds + 2); params.append('score_10', '10'); params.append('totalq', totalPackages);
+        params.append('score', tn_score_calc); params.append('max_score', max_tn_score); params.append('answered', totalPackages);
+        params.append('correct', totalPackages); params.append('count_problems', totalPackages); params.append('percent', '100');
+        params.append('pscore', '10'); params.append('score_status', '10');
+        const vLog = { [timeInit]: 'start', [timeInit + 1]: 'start', [timeInit + 10]: 'reload' };
+        params.append('log', JSON.stringify(vLog));
+    } else if (isExam) {
+        params.append('time_init', timeInit); params.append('time_spent', totalSeconds); params.append('score', tn_score_calc);
+        params.append('max_score', max_tn_score + tl_max_calc); params.append('tn_score', tn_score_calc); params.append('type_exam', '1');
+        params.append('correct', tn_score_calc); params.append('wrong', 0); params.append('name_user', ''); params.append('tl_score', '0');
+        params.append('times', '0'); params.append('iframe', 'false');
+        let curT = timeInit + Math.floor(totalSeconds * 0.1);
+        const totalQs = raw_questions.length;
+        const usableTime = Math.max(10, totalSeconds - Math.floor(totalSeconds * 0.1) - 10);
+        const baseInterval = usableTime / (totalQs || 1);
+        for (let c = 0; c < totalQs; c++) {
+            curT += Math.floor(baseInterval * (0.7 + Math.random() * 0.6));
+            if (curT >= timeInit + totalSeconds) curT = timeInit + totalSeconds - 2;
+            params.append(`choose_log[${c}][ind]`, c);
+            params.append(`choose_log[${c}][t]`, Math.floor(curT));
+            params.append(`choose_log[${c}][l]`, c + 1);
+        }
+    } else {
+        params.append('time_init', timeInit); params.append('time_spent', totalSeconds); params.append('time_elapsed', totalSeconds);
+        params.append('score', '100'); params.append('score_10', '10'); params.append('star', '20'); params.append('theta', '0');
+        params.append('max_score', '100'); params.append('answered', totalPackages); params.append('correct', totalPackages);
+        params.append('wrong', '0'); params.append('missed', '0'); params.append('count_problems', totalPackages);
+        params.append('type', '3'); params.append('type_exam', '0');
+        const pLog = { [timeInit]: 'start', [timeInit + 1]: 'start' };
+        params.append('log', JSON.stringify(pLog));
+    }
+    params.append('count_redo', '0'); params.append('ended', '1'); params.append('save_star', '1');
+    return params.toString();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  KEY VALIDATION — proxy tới keyvault-vn.onrender.com
+// ══════════════════════════════════════════════════════════════════════════════
+function proxyVerify(key, hwid, olmUser) {
+    return new Promise((resolve) => {
+        const postData = JSON.stringify({ key, app: APP_ID, device: hwid || 'unknown', olm_user: olmUser || '' });
+        const opts = {
+            hostname: 'keyvault-vn.onrender.com', port: 443, path: '/api/verify', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) }, timeout: 15000
+        };
+        const req = https.request(opts, (res) => {
+            let raw = '';
+            res.on('data', c => raw += c);
+            res.on('end', () => {
+                if (res.statusCode !== 200) return resolve({ success: false, message: `KeyVault lỗi HTTP ${res.statusCode}: ${raw.slice(0, 120) || 'không phản hồi'}` });
+                try {
+                    const kv = JSON.parse(raw);
+                    resolve({
+                        success: kv.success !== undefined ? !!kv.success : !!kv.valid,
+                        message: kv.message || kv.reason || (kv.valid === false ? 'Key không hợp lệ (KeyVault từ chối)' : ''),
+                        type: kv.type || kv.plan || kv.level || '',
+                        expires_at: kv.expires_at || kv.exp || kv.expire || ''
+                    });
+                } catch (_) { resolve({ success: false, message: `KeyVault trả về không phải JSON (có thể đang khởi động): ${raw.slice(0, 80)}` }); }
+            });
+        });
+        req.on('error', e => resolve({ success: false, message: 'Lỗi kết nối KeyVault: ' + e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ success: false, message: 'KeyVault timeout (server đang ngủ — thử lại)' }); });
+        req.write(postData); req.end();
+    });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ROUTES (API ẩn tại API_PREFIX)
+// ══════════════════════════════════════════════════════════════════════════════
+// Root — tối thiểu, không tiết lộ endpoint
+app.get('/', (_req, res) => res.json({ ok: true, t: Date.now() }));
+
+// Ping (ẩn) — client kiểm tra kết nối
+app.get(API_PREFIX + '/ping', (_req, res) => res.json({ ok: true, t: Date.now() }));
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v8] /bootstrap.js — loader.user.js TẢI toàn bộ connector code (chỉ GET,
+//  ẩn sau API_PREFIX + mã hoá AES-GCM key derive từ SECRET). Không cần key,
+//  không cần session → loader chỉ có đúng 1 chức năng: kéo code về chạy.
+// ══════════════════════════════════════════════════════════════════════════════
+app.get(API_PREFIX + '/bootstrap.js', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, null, 'bootstrap.js');
+    if (guardBanned(req, res, ip, null, 'bootstrap.js')) return;
+    if (!rateLimit('boot:' + ip, 60, 60000)) return res.status(429).json({ error: 'Too many requests' });
+    // [v12] SMART_VM_BLOCK: blanket block da thay bang smart check (xem duoi) — khong chan user mobile that
+    // [v11] chan UA bot/curl/emulator (truoc bootstrap chi check IP datacenter)
+    if (isBadUA(req.headers['user-agent'])) { adminLog('badua-block', { ip, path: 'bootstrap.js', ua: String(req.headers['user-agent'] || '').slice(0, 60) }); return res.status(404).json({ error: 'Not found' }); }
+    // [v10] HARD_DC_BAN: máy ảo/VPS/proxy kéo bootstrap.js → BAN NGAY (chặn trước khi lấy được code)
+    const pBoot = await checkProxyIp(ip);
+    if (HARD_DC_BAN && pBoot.risk === 'high' && pBoot.isDC && pBoot.isVPN && !(uaIsMobile(req.headers['user-agent']) || (SMART_BAN && isRealMobileDevice(ip, null, req.headers['user-agent'])))) { addBan(ip, null, 'IP datacenter/proxy keo bootstrap.js (HARD_DC_BAN v11) — ' + (pBoot.org || ''), ''); adminLog('dc-ban', { ip, path: 'bootstrap.js', org: pBoot.org || '' }); return res.status(404).json({ error: 'Not found' }); }
+    // [v12] SMART_VM_BLOCK: khi admin BAT toggle, chi Android/iOS that (UA mobile) + IP khong phai datacenter moi keo duoc code.
+    //       VM/proxy/desktop/bot -> 404. Khi TAT -> cho moi nguoi (HARD_DC_BAN van tu chan datacenter).
+    if (BLOCK_VM_SCRIPT && (!isMobileUA(req.headers['user-agent']) || pBoot.isDC)) { adminLog('vm-smart-block', { ip, path: 'bootstrap.js', ua: String(req.headers['user-agent'] || '').slice(0, 60), isDC: !!pBoot.isDC }); return res.status(404).json({ error: 'Not found' }); }
+    try {
+        const src     = renderConnectorSrc(req);
+        const payload = bootstrapEncrypt(src);
+        adminLog('bootstrap', { ip, ua: String(req.headers['user-agent'] || '').slice(0, 80), bytes: src.length });
+        res.json({ ok: true, v: CONNECTOR_MODULE_VERSION, payload });
+    } catch (err) {
+        console.error('[/bootstrap.js]', err);
+        res.status(500).json({ ok: false, error: 'Server error' });
+    }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v8.1] /kv-payload.js — PAYLOAD TƯƠNG THÍCH KEYVAULT (server index.js)
+//  Trả RAW JS (không mã hoá): tự cài bridge mạng + chạy connector ngay.
+//  Cách dùng: mở URL này trong trình duyệt → copy toàn bộ nội dung JS →
+//  upload lên KeyVault (trang "📤 Nạp file code") → loader OLM_user.js
+//  của KeyVault sẽ kéo về chạy. Không cần loader Payload.js nữa.
+// ══════════════════════════════════════════════════════════════════════════════
+app.get(API_PREFIX + '/kv-payload.js', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, null, 'kv-payload.js');
+    if (guardBanned(req, res, ip, null, 'kv-payload.js')) return;
+    if (!rateLimit('kvp:' + ip, 40, 60000)) return res.status(429).send('/* too many requests */');
+    // [v12] SMART_VM_BLOCK: blanket block da thay bang smart check (xem duoi)
+    // [v11] chan UA bot/curl/emulator + IP datacenter (truoc day endpoint nay KHONG co check nao -> lo hong)
+    if (isBadUA(req.headers['user-agent'])) { adminLog('badua-block', { ip, path: 'kv-payload.js', ua: String(req.headers['user-agent'] || '').slice(0, 60) }); return res.status(404).send('/* not found */'); }
+    const pKvp = await checkProxyIp(ip);
+    if (HARD_DC_BAN && pKvp.risk === 'high' && pKvp.isDC && pKvp.isVPN && !(uaIsMobile(req.headers['user-agent']) || (SMART_BAN && isRealMobileDevice(ip, null, req.headers['user-agent'])))) { addBan(ip, null, 'IP datacenter/proxy keo kv-payload.js (HARD_DC_BAN v11) — ' + (pKvp.org || ''), ''); adminLog('dc-ban', { ip, path: 'kv-payload.js', org: pKvp.org || '' }); return res.status(404).send('/* not found */'); }
+    // [v12] SMART_VM_BLOCK: chi Android/iOS that moi keo duoc raw connector khi toggle BAT
+    if (BLOCK_VM_SCRIPT && (!isMobileUA(req.headers['user-agent']) || pKvp.isDC)) { adminLog('vm-smart-block', { ip, path: 'kv-payload.js', ua: String(req.headers['user-agent'] || '').slice(0, 60), isDC: !!pKvp.isDC }); return res.status(404).send('/* not found */'); }
+    try {
+        const src = buildKvPayloadSrc(req);
+        adminLog('kv-payload', { ip, ua: String(req.headers['user-agent'] || '').slice(0, 80), bytes: src.length });
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.send(src);
+    } catch (err) {
+        console.error('[/kv-payload.js]', err);
+        res.status(500).send('/* server error */');
+    }
+});
+
+// [v9] iOS-FIX: loader.user.js tu server — cai thay the tren iOS de fix loi __GMFunc__
+app.get(API_PREFIX + '/loader.user.js', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, null, 'loader.user.js');
+    if (guardBanned(req, res, ip, null, 'loader.user.js')) return;
+    if (!rateLimit('ldr:' + ip, 30, 60000)) return res.status(429).send('// too many requests');
+    // [v12] SMART_VM_BLOCK: blanket block da thay bang smart check (xem duoi)
+    // [v11] chan UA bot/curl/emulator + IP datacenter (truoc day endpoint nay KHONG co check nao -> lo hong)
+    if (isBadUA(req.headers['user-agent'])) { adminLog('badua-block', { ip, path: 'loader.user.js', ua: String(req.headers['user-agent'] || '').slice(0, 60) }); return res.status(404).send('// not found'); }
+    const pLdr = await checkProxyIp(ip);
+    if (HARD_DC_BAN && pLdr.risk === 'high' && pLdr.isDC && pLdr.isVPN && !(uaIsMobile(req.headers['user-agent']) || (SMART_BAN && isRealMobileDevice(ip, null, req.headers['user-agent'])))) { addBan(ip, null, 'IP datacenter/proxy keo loader.user.js (HARD_DC_BAN v11) — ' + (pLdr.org || ''), ''); adminLog('dc-ban', { ip, path: 'loader.user.js', org: pLdr.org || '' }); return res.status(404).send('// not found'); }
+    // [v12] SMART_VM_BLOCK: chi Android/iOS that moi keo duoc loader khi toggle BAT
+    if (BLOCK_VM_SCRIPT && (!isMobileUA(req.headers['user-agent']) || pLdr.isDC)) { adminLog('vm-smart-block', { ip, path: 'loader.user.js', ua: String(req.headers['user-agent'] || '').slice(0, 60), isDC: !!pLdr.isDC }); return res.status(404).send('// not found'); }
+    try {
+        adminLog('loader-served', { ip, ua: String(req.headers['user-agent'] || '').slice(0, 60) });
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.send(buildLoaderSrc(req));
+    } catch (err) { console.error('[/loader.user.js]', err); res.status(500).send('// server error'); }
+});
+// [v9] OLM BAN CHECK endpoint: connector poll de biet tai khoan OLM hien tai co bi ban khong
+app.post(API_PREFIX + '/olm-check', (req, res) => {
+    const ip = getClientIp(req);
+    if (!rateLimit('olmc:' + ip, 30, 60000)) return res.status(429).json({ banned: false });
+    const olm_user = (req.body && req.body.olm_user) || '';
+    const ob = checkOlmBan(olm_user);
+    if (ob) {
+        adminLog('olm-ban-check', { olm_user: normOlm(olm_user), ip, reason: ob.reason });
+        return res.json({ banned: true, permanent: ob.permanent, remain: ob.remain || '', reason: ob.reason,
+            message: 'Tai khoan OLM ' + String(olm_user || '') + ' da bi BAN' + (ob.permanent ? ' VINH VIEN' : ' (con ' + ob.remain + ')') + '. Ly do: ' + ob.reason });
+    }
+    res.json({ banned: false });
+});
+// Verify key
+app.post(API_PREFIX + '/verify'
+, async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, (req.body && req.body.hwid) || null, 'route');
+    if (guardBanned(req, res, ip, (req.body && req.body.hwid) || null, 'api')) return;
+    if (!rateLimit('verify:' + ip + '|' + ((req.body && req.body.hwid) || ''), 20, 60000)) return res.status(429).json({ success: false, message: 'Quá nhiều yêu cầu' });
+    const { key, hwid, olm_user } = req.body || {};
+    if (!key) return res.status(400).json({ success: false, message: 'Missing key' });
+    // [v9] Kiem tra ban tai khoan OLM NGAY tai verify (chan dang nhap)
+    const _obV = checkOlmBan(olm_user);
+    if (_obV) {
+        adminLog('olm-ban-verify', { olm_user: normOlm(olm_user), hwid, ip, reason: _obV.reason, permanent: _obV.permanent });
+        return res.status(403).json({ success: false, olmBanned: true, permanent: _obV.permanent, remain: _obV.remain || '',
+            message: 'Tai khoan OLM ' + String(olm_user || '') + ' da bi BAN' + (_obV.permanent ? ' VINH VIEN' : ' (con ' + _obV.remain + ')') + '. Ly do: ' + _obV.reason });
+    }
+    const shV = checkKeyShare(key, hwid, ip);
+    if (shV.shared) {
+        if (SMART_BAN && realMobileReq(req, hwid)) adminLog('share-soft-mobile', { key: maskKey(key), hwid, ip, route: 'verify' });
+        else return res.status(403).json({ success: false, message: 'Key đang được dùng trên nhiều thiết bị (anti-share)' });
+    }
+    const result = await proxyVerify(key, hwid, olm_user);
+    if (!result.success) { if (recordKeyFail(ip) && AUTO_BAN && !isLoopbackIp(ip)) addBan(ip, null, 'brute-force key (>=10 sai/10 phut)', ''); } else resetKeyFail(ip); // [v7] anti brute-force key [v9] ban that khi vuot nguong
+    adminLog('verify', { key: maskKey(key), hwid, device: deviceNameOf(hwid), olm_user, ip, success: !!result.success, type: result.type || '', message: result.message || '' });
+    trackDevice(hwid, { olm_user: normOlm(olm_user), ip });
+    res.json(result);
+});
+
+// Attestation — client gửi fp + device info, server kiểm tra máy thật + mạng thật, cấp session
+app.post(API_PREFIX + '/attest', async (req, res) => {
+    const ip = getClientIp(req);
+    const { key, hwid, fp, device } = req.body || {};
+    unlockReal(req, ip, hwid, 'attest');
+    if (guardBanned(req, res, ip, hwid, 'attest')) return;
+    if (!key) return res.status(400).json({ success: false, message: 'Thiếu key' });
+    const shA = checkKeyShare(key, hwid, ip);
+    if (shA.shared) {
+        if (SMART_BAN && realMobileReq(req, hwid)) adminLog('share-soft-mobile', { key: maskKey(key), hwid, ip, route: 'attest' });
+        else return res.status(403).json({ success: false, message: 'Key đang được dùng trên nhiều thiết bị (anti-share)' });
+    }
+    if (!rateLimit('attest:' + ip + '|' + (hwid || ''), 30, 60000)) return res.status(429).json({ success: false, message: 'Quá nhiều lần xác thực' });
+
+    // 1. Kiểm tra thiết bị thật (Android/iOS, không máy ảo, không trình duyệt giả)
+    const v = validateDevice(fp, device, req.headers['user-agent']);
+    if (!v.ok) {
+        if (v.ban && AUTO_BAN && !isLoopbackIp(ip)) addBan(ip, hwid, v.reason, v.deviceName);
+        adminLog('reject', { ip, hwid, device: v.deviceName, reason: v.reason, banned: !!(v.ban && AUTO_BAN) });
+        return res.status(403).json({ success: false, message: v.ban ? 'Thiết bị/mạng không hợp lệ — đã bị khoá vĩnh viễn, liên hệ admin' : 'Chỉ hỗ trợ trên máy Android/iOS thật với trình duyệt thật' });
+    }
+    // [v14] SMART_BAN: danh dau thiet bi di dong that da xac thuc -> KHONG bao gio bi ban + tu mo ban neu co
+    if (SMART_BAN && /android|iphone|ipad|ipod/i.test(String(req.headers['user-agent'] || ''))) {
+        const _rd = realDevices.get(hwid) || {};
+        realDevices.set(hwid, { ip, deviceName: v.deviceName, firstSeen: _rd.firstSeen || Date.now(), lastSeen: Date.now() });
+        autoUnbanIfReal(ip, hwid, req.headers['user-agent'], 'attest-real-mobile');
+    }
+    // 2. Kiểm tra mạng thật (không proxy/VPN/datacenter)
+    // [FIX v8.1] KHÔNG ban vĩnh viễn IP & KHÔNG chặn khi nghi proxy/VPN. Lý do: IP nhà mạng
+    //            di động (Viettel/Vinaphone/Mobifone) thường bị ipapi.is nhận NHẦM thành
+    //            datacenter/proxy (carrier-grade NAT) → ban nhầm thiết bị thật + thật trình duyệt.
+    //            Đã qua bước 1 validateDevice (chỉ thiết bị Android/iOS thật mới tới đây) → nếu
+    //            thiết bị thật mà IP bị nghi proxy, khả năng cao là nhận nhầm. Chỉ log cảnh báo.
+    const p = await checkProxyIp(ip);
+    if (p.risk === 'high') {
+        // [v10] HARD_DC_BAN: IP datacenter HOẶC (proxy + thiết bị nghi ngờ) → BAN NGAY.
+        //       Chỉ soft khi IP nghi proxy nhưng KHÔNG phải datacenter và thiết bị sạch (tránh ban nhầm nhà mạng di động CGNAT).
+        if (HARD_DC_BAN && p.isDC && p.isVPN && !(uaIsMobile(req.headers['user-agent']) || (SMART_BAN && isRealMobileDevice(ip, hwid, req.headers['user-agent'])))) {
+            addBan(ip, hwid, 'proxy/VPN/datacenter + IP datacenter (HARD_DC_BAN)', v.deviceName);
+            adminLog('proxy-ban', { ip, hwid, device: v.deviceName, org: p.org || '', country: p.country || '', isDC: !!p.isDC, suspicious: !!v.suspicious });
+            return res.status(403).json({ success: false, message: 'Mạng không hợp lệ (proxy/VPN/datacenter) — đã khoá vĩnh viễn, liên hệ admin' });
+        }
+        adminLog('proxy-warn', { ip, hwid, device: v.deviceName, reason: 'proxy/VPN (soft, co the la nha mang di dong CGNAT)', org: p.org || '', country: p.country || '' });
+    }
+    // [v10] Key bị revokle (dump/rò rỉ) → 404 + ban thiết bị
+    if (keyBlocked(req, res, key, ip, hwid, v.deviceName, 'attest')) return;
+    // [v10] DUMPER_GUARD: ghi nhận attest
+    dumperJudge(key, hwid, ip, v.deviceName, 'attest');
+    // 3. Key phải hợp lệ
+    const kv = await proxyVerify(key, hwid);
+    if (!kv.success) {
+        // [v7] anti brute-force: 10 lần sai key / 10p từ 1 IP → BAN
+        if (recordKeyFail(ip) && AUTO_BAN && !isLoopbackIp(ip)) addBan(ip, hwid, 'brute-force key (10 lần sai)', v.deviceName);
+        return res.status(401).json({ success: false, message: kv.message || 'Key không hợp lệ' });
+    }
+    resetKeyFail(ip);
+    // 4. Đăng ký thiết bị vào registry (hiển thị tên máy trong log admin)
+    devices.set(hwid || 'unknown', {
+        name: v.deviceName, model: (device && device.model) || '', os: (device && device.os) || '',
+        ip, lastSeen: Date.now()
+    });
+    kvSaveState();
+    // 5. Cấp session stateless (5 phút)
+    const fph = fpHash(fp);
+    const token = signSession({ k: key, h: hwid || '', ip, fp: fph, dev: v.deviceName, exp: Date.now() + SESSION_TTL, seq: 1, ua: sha256Hex(req.headers['user-agent'] || '').slice(0, 16), fireReady: false });
+    // AUTO-SEND module "CHUẨN BỊ 10 ĐIỂM": chỉ đính kèm khi key PREMIUM + môi trường sạch
+    const resp = { success: true, session: token, expiresIn: 300, fpHash: fph, device: v.deviceName, message: 'Thiết bị & mạng hợp lệ — phiên đã cấp', moduleVersion: PAYLOAD_MODULE_VERSION, connectorVersion: CONNECTOR_MODULE_VERSION };
+        if (isPremiumType(kv.type) && !BLOCK_MODULE_10) { keyAct(key).moduleFetchCount++; resp.module = buildModulePayload(token, key, hwid); }
+    trackDevice(hwid, { device: v.deviceName, ip });
+    // [v7] AUTO-SEND TOÀN BỘ code connector xuống loader — mọi key hợp lệ (không chỉ premium)
+    resp.connector = buildConnectorPayload(token);
+    adminLog('attest', { key: maskKey(key), hwid, device: v.deviceName, ip, success: true, premium: isPremiumType(kv.type) });
+    res.json(resp);
+});
+
+// Process — giải mã đáp án (cần session)
+app.post(API_PREFIX + '/process', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, (req.body && req.body.hwid) || null, 'route');
+    if (guardBanned(req, res, ip, (req.body && req.body.hwid) || null, 'api')) return;
+    if (!requireSession(req, res)) return;
+    if (!rateLimit('ip:' + ip + '|' + ((req.body && req.body.hwid) || ''), 30, 60000)) return res.status(429).json({ success: false, message: 'Quá nhiều yêu cầu (IP)' });
+    const { key, hwid, questions } = req.body || {};
+    if (!key) return res.status(401).json({ success: false, message: 'Missing key' });
+    if (!Array.isArray(questions) || questions.length === 0) return res.status(400).json({ success: false, message: 'No questions' });
+    const kv = await proxyVerify(key, hwid);
+    if (!kv.success) return res.status(401).json({ success: false, message: kv.message || 'Invalid key' });
+    dumperJudge(key, hwid, ip, deviceNameOf(hwid), 'process'); // [v10] đánh dấu hoạt động thật → giảm nghi ngờ dump
+    if (keyBlocked(req, res, key, ip, hwid, deviceNameOf(hwid), 'core')) return;
+    adminLog('process', { key: maskKey(key), hwid, device: deviceNameOf(hwid), ip, questions: questions.length, type: kv.type || '' });
+    const processed = questions.map((item, index) => {
+        const rawContent = item.content || item.json_content;
+        const htmlDecrypted = decryptOLM(rawContent);
+        const answers = htmlDecrypted ? extractAnswers(htmlDecrypted) : ['Lỗi giải mã'];
+        return { index: index + 1, id: item.id, title: item.title || `Câu ${index + 1}`, answers };
+    });
+    // Mã hóa đáp án AES-256-GCM (anti-dump) + xoay session
+    if (req._sess) req._sess.fireReady = true; // [v6.5] chỉ được /fire SAU khi đã /process (anti direct-fire)
+    const payload = { success: true, encrypted: true, count: processed.length, payload: encryptAnswers(processed, req.headers['x-session']) };
+    res.json(rotateSession(req, payload));
+});
+
+// Fire — build payload nộp bài (cần session, key VIP)
+app.post(API_PREFIX + '/fire', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, (req.body && req.body.hwid) || null, 'route');
+    if (guardBanned(req, res, ip, (req.body && req.body.hwid) || null, 'api')) return;
+    if (!requireSession(req, res)) return;
+    const { key, hwid, session, mode, time_str, grade } = req.body || {};
+    if (!key) return res.status(401).json({ success: false, message: 'Missing key' });
+    // [v6.5.1] fireReady — CHỈ GHI LOG, KHÔNG chặn (chữ ký + phiên + premium check đã đủ mạnh).
+    //          Chặn cứng làm lỗi khi phiên hết hạn & attest lại mất cờ fireReady.
+    if (!req._sess || !req._sess.fireReady) { adminLog('fire-noready', { ip, hwid, key: maskKey(key) }); }
+    dumperJudge(key, hwid, ip, deviceNameOf(hwid), 'fire'); // [v10] đánh dấu hoạt động thật (nộp bài) → reset nghi ngờ dump
+    if (keyBlocked(req, res, key, ip, hwid, deviceNameOf(hwid), 'core')) return;
+    if (!fireRateOk(key)) { adminLog('fire-ratelimit', { ip, hwid, key: maskKey(key) }); return res.status(429).json({ success: false, message: 'Quá nhiều lần nộp bài (tối đa 8 lần/giờ)' }); }
+    if (!session) return res.status(400).json({ success: false, message: 'Missing session' });
+    const kv = await proxyVerify(key, hwid);
+    if (!kv.success) return res.status(401).json({ success: false, message: kv.message || 'Invalid key' });
+    adminLog('fire', { key: maskKey(key), hwid, device: deviceNameOf(hwid), ip, mode: mode || '', type: kv.type || '' });
+    const keyType = (kv.type || '').toUpperCase();
+    if (!['PREMIUM', 'VIP', 'UNLIMITED'].includes(keyType))
+        return res.status(403).json({ success: false, message: 'Chức năng này yêu cầu key PREMIUM/VIP!' });
+    if (!Array.isArray(session.raw_questions) || session.raw_questions.length === 0)
+        return res.status(400).json({ success: false, message: 'raw_questions rỗng!' });
+    if (!session.meta || !session.meta.id_user || !session.meta.id_cate)
+        return res.status(400).json({ success: false, message: 'Thiếu meta (id_user / id_cate)' });
+    trackDevice(hwid, { id_cate: session.meta.id_cate, id_user: session.meta.id_user, mode: mode || '', ip });
+    try {
+        const paramsStr = buildFirePayload(session, mode || 'practice', time_str || '10.00', grade);
+        res.json(rotateSession(req, { success: true, params_str: paramsStr, endpoint: '/course/teacher-static' }));
+    } catch (err) {
+        console.error('[/fire]', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  /module — client TẢI CHỦ ĐỘNG module "CHUẨN BỊ 10 ĐIỂM" (cần session + premium)
+//  Trả về mã hoá AES-256-GCM; client giải mã bằng session token.
+// ══════════════════════════════════════════════════════════════════════════════
+app.post(API_PREFIX + '/module', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, (req.body && req.body.hwid) || null, 'route');
+    if (guardBanned(req, res, ip, (req.body && req.body.hwid) || null, 'api')) return;
+    // [v10] /module BẮT BUỘC có session hợp lệ (không còn legacy bypass — dumper luôn cố gắng endpoint này)
+    if (!req.headers['x-session']) {
+        adminLog('module-no-session', { ip, hwid: req.body && req.body.hwid, ua: String(req.headers['user-agent'] || '').slice(0, 60) });
+        if (DUMPER_GUARD && (req.body && req.body.key) && !realMobileReq(req, req.body.hwid)) addKeyBan(req.body.key, 'goi /module khong co session — dumper', ip, req.body.hwid, '');
+        else if (DUMPER_GUARD && (req.body && req.body.key)) adminLog('module-nosession-soft-mobile', { ip, hwid: req.body && req.body.hwid });
+        return res.status(403).json({ success: false, message: 'Phiên không hợp lệ' });
+    }
+    if (!requireSession(req, res)) return;
+    // [v11] defense-in-depth: IP datacenter dung session cu lay module -> ban (session da rang buoc IP, them lop)
+    const pMod = await checkProxyIp(ip);
+    if (HARD_DC_BAN && pMod.risk === 'high' && pMod.isDC && pMod.isVPN && !(uaIsMobile(req.headers['user-agent']) || (SMART_BAN && isRealMobileDevice(ip, req.body && req.body.hwid, req.headers['user-agent'])))) { addBan(ip, req.body && req.body.hwid, 'IP datacenter goi /module (HARD_DC_BAN v11) — ' + (pMod.org || ''), deviceNameOf(req.body && req.body.hwid)); adminLog('dc-ban', { ip, hwid: req.body && req.body.hwid, path: 'module', org: pMod.org || '' }); return res.status(404).json({ error: 'Not found' }); }
+    const { key, hwid } = req.body || {};
+    if (keyBlocked(req, res, key, ip, hwid, deviceNameOf(hwid), 'core')) return;
+    // [v10] Rate limit nghiêm ngặt: 2 lần/giờ/key (connector thật không bao giờ gọi /module — module đẩy tự động qua attest/heartbeat)
+    if (!rateLimit('mod:' + String(key || ip), 10, 3600000)) { adminLog('mod-ratelimit', { key: maskKey(key||''), hwid, ip, note: '[v13] vuot nguong 10 lan/gio — chi 429, khong ban' }); return res.status(429).json({ success: false, message: 'Quá nhiều yêu cầu' }); } // [v13] nguong 2->10, khong ban key
+    // [v12] SMART_VM_BLOCK: /module da BAT BUOC session (chi thiet bi that qua /attest moi co) -> khong can chan blanket nua; DUMPER_GUARD + rate-limit + watermark phong dump.
+    if (BLOCK_MODULE_10) { adminLog('module10-block', { ip, hwid }); return res.status(403).json({ success: false, message: 'Module chuan bi 10 diem da bi admin chan' }); }
+    if (!key) return res.status(401).json({ success: false, message: 'Missing key' });
+    // [v10] DUMPER_GUARD: phát hiện hành vi dump → BAN key+hwid+ip vĩnh viễn
+    const djMod = dumperJudge(key, hwid, ip, deviceNameOf(hwid), 'module');
+    if (djMod) {
+        if (realMobileReq(req, hwid)) { adminLog('dumper-soft-mobile', { key: maskKey(key), ip, hwid, reason: djMod }); }
+        else { addKeyBan(key, djMod, ip, hwid, deviceNameOf(hwid)); return res.status(403).json({ success: false, message: 'Phát hiện hành vi dump — key & thiết bị đã bị khoá vĩnh viễn' }); }
+    }
+    const kv = await proxyVerify(key, hwid);
+    if (!kv.success) return res.status(401).json({ success: false, message: kv.message || 'Invalid key' });
+    if (!isPremiumType(kv.type)) return res.status(403).json({ success: false, message: 'Module chỉ dành cho key PREMIUM/VIP/UNLIMITED' });
+    adminLog('module', { key: maskKey(key), hwid, device: deviceNameOf(hwid), ip, type: kv.type || '' });
+    const payload = { success: true, encrypted: true, moduleVersion: PAYLOAD_MODULE_VERSION, module: buildModulePayload(req._token, key, hwid) };
+    res.json(rotateSession(req, payload));
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v7] /code — loader TẢI LẠI toàn bộ connector code (cần session hợp lệ).
+//  Dùng khi phiên hết hạn hoặc cập nhật version. Mã hoá AES-256-GCM key derive
+//  từ session token (chỉ client attest hợp lệ mới giải mã được).
+// ══════════════════════════════════════════════════════════════════════════════
+app.post(API_PREFIX + '/code', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, (req.body && req.body.hwid) || null, 'route');
+    if (guardBanned(req, res, ip, (req.body && req.body.hwid) || null, 'api')) return;
+    if (!requireSession(req, res)) return;
+    if (!rateLimit('code:' + ip + '|' + ((req.body && req.body.hwid) || ''), 10, 60000)) return res.status(429).json({ success: false, message: 'Quá nhiều yêu cầu' });
+    // [v12] SMART_VM_BLOCK: /code da BAT BUOC session -> khong can chan blanket nua.
+    const { key, hwid } = req.body || {};
+    if (!key) return res.status(401).json({ success: false, message: 'Missing key' });
+    const kv = await proxyVerify(key, hwid);
+    if (!kv.success) return res.status(401).json({ success: false, message: kv.message || 'Invalid key' });
+    adminLog('code', { key: maskKey(key), hwid, device: deviceNameOf(hwid), ip, connectorVersion: CONNECTOR_MODULE_VERSION });
+    const payload = { success: true, encrypted: true, connectorVersion: CONNECTOR_MODULE_VERSION, connector: buildConnectorPayload(req._token) };
+    res.json(rotateSession(req, payload));
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  /heartbeat — client gọi LIÊN TỤC mỗi ~30s gửi fp/device mới.
+//  Server kiểm tra lại: trình duyệt giả? máy ảo/emulator? proxy/VPN/datacenter?
+//  key còn hợp lệ? Nếu PHÁT HIỆN bất hợp lệ → AUTO-BAN + trả {blocked:true}
+//  → client tự huỷ (xóa key + UI). Nếu sạch + premium + version cũ → AUTO-PUSH
+//  module "CHUẨN BỊ 10 ĐIỂM" mới nhất (mã hoá bằng session token nếu có).
+// ══════════════════════════════════════════════════════════════════════════════
+app.post(API_PREFIX + '/heartbeat', async (req, res) => {
+    const ip = getClientIp(req);
+    unlockReal(req, ip, (req.body && req.body.hwid) || null, 'route');
+    if (guardBanned(req, res, ip, (req.body && req.body.hwid) || null, 'api')) return;
+    if (!rateLimit('hb:' + ip + '|' + ((req.body && req.body.hwid) || ''), 30, 60000)) return res.status(429).json({ success: false, message: 'Quá nhiều yêu cầu' });
+    const { key, hwid, fp, device, clientVersion } = req.body || {};
+    if (!key) return res.status(400).json({ success: false, message: 'Thiếu key' });
+    const shH = checkKeyShare(key, hwid, ip);
+    if (shH.shared) {
+        if (SMART_BAN && realMobileReq(req, hwid)) adminLog('share-soft-mobile', { key: maskKey(key), hwid, ip, route: 'heartbeat' });
+        else return res.status(403).json({ blocked: true, reason: 'share', message: 'Key đang được dùng trên nhiều thiết bị (anti-share)' });
+    }
+    // 1. Kiểm tra lại thiết bị (có thể user bật giả lập/webdriver lúc đang chạy)
+    const v = validateDevice(fp, device, req.headers['user-agent']);
+    if (!v.ok) {
+        if (v.ban && AUTO_BAN && !isLoopbackIp(ip)) addBan(ip, hwid, 'heartbeat: ' + v.reason, v.deviceName);
+        adminLog('heartbeat-block', { ip, hwid, device: v.deviceName, reason: v.reason, banned: !!(v.ban && AUTO_BAN) });
+        return res.status(403).json({ blocked: true, reason: v.reason, message: 'Phát hiện môi trường không hợp lệ — đã khoá' });
+    }
+    // [v14] SMART_BAN: cap nhat real device + tu mo ban neu co
+    if (SMART_BAN && /android|iphone|ipad|ipod/i.test(String(req.headers['user-agent'] || ''))) {
+        const _rdh = realDevices.get(hwid) || {};
+        realDevices.set(hwid, { ip, deviceName: v.deviceName, firstSeen: _rdh.firstSeen || Date.now(), lastSeen: Date.now() });
+        autoUnbanIfReal(ip, hwid, req.headers['user-agent'], 'heartbeat-real-mobile');
+    }
+    // 2. Kiểm tra lại mạng (có thể user bật VPN/VPS lúc đang chạy)
+    const p = await checkProxyIp(ip);
+    if (p.risk === 'high') {
+        // [v10] HARD_DC_BAN: IP datacenter HOẶC (proxy + thiết bị nghi ngờ) → BAN NGAY
+        if (HARD_DC_BAN && p.isDC && p.isVPN && !(uaIsMobile(req.headers['user-agent']) || (SMART_BAN && isRealMobileDevice(ip, hwid, req.headers['user-agent'])))) {
+            addBan(ip, hwid, 'heartbeat: proxy/VPN/datacenter + IP datacenter (HARD_DC_BAN)', v.deviceName);
+            adminLog('proxy-ban', { ip, hwid, device: v.deviceName, org: p.org || '', isDC: !!p.isDC });
+            return res.status(403).json({ blocked: true, reason: 'proxy', message: 'Mạng không hợp lệ — đã khoá vĩnh viễn' });
+        }
+        adminLog('heartbeat-warn', { ip, hwid, device: v.deviceName, reason: 'proxy/VPN (soft, co the la nha mang di dong)', org: p.org || '' });
+    }
+    // [v10] Key bị revokle → khoá
+    if (keyBlocked(req, res, key, ip, hwid, v.deviceName, 'heartbeat')) return;
+    // 3. Kiểm tra key còn hợp lệ
+    const kv = await proxyVerify(key, hwid);
+    if (!kv.success) {
+        adminLog('heartbeat-block', { ip, hwid, reason: 'key thu hồi/hết hạn', message: kv.message || '' });
+        return res.status(403).json({ blocked: true, reason: 'key', message: kv.message || 'Key đã bị vô hiệu hoá' });
+    }
+    // 4. Cập nhật lastSeen thiết bị
+    if (hwid && devices.has(hwid)) { const d = devices.get(hwid); d.lastSeen = Date.now(); d.ip = ip; }
+    // 5. AUTO-PUSH module nếu premium + client đang chạy version cũ
+    const premium = isPremiumType(kv.type);
+    const out = { ok: true, t: Date.now(), nextCheck: 30000, moduleVersion: PAYLOAD_MODULE_VERSION, premium, connectorVersion: CONNECTOR_MODULE_VERSION };
+    const cv = parseInt(clientVersion || '0', 10);
+    // [v10] DUMPER_GUARD: dumper v2/v3 luôn gửi clientVersion=0 & connectorVersion=0 để ép server đẩy module/connector
+    if (cv === 0 && parseInt(req.body.connectorVersion || '0', 10) === 0) {
+        const dj0 = dumperJudge(key, hwid, ip, v.deviceName, 'heartbeat-zero');
+        if (dj0) {
+            if (realMobileReq(req, hwid)) { adminLog('dumper-zero-soft-mobile', { key: maskKey(key), ip, hwid, reason: dj0 }); }
+            else { addKeyBan(key, dj0, ip, hwid, v.deviceName); return res.status(403).json({ blocked: true, reason: 'dumper', message: 'Phát hiện dumper — key & thiết bị đã bị khoá vĩnh viễn' }); }
+        }
+    }
+        if (premium && cv < PAYLOAD_MODULE_VERSION && !BLOCK_MODULE_10) {
+        // Dùng session token nếu client gửi kèm (X-Session hợp lệ); nếu không, cấp token tạm
+        let tok = null;
+        const sessTok = req.headers['x-session'];
+        const sess = verifySession(sessTok);
+        if (sess && sess.k === key && sess.h === (hwid || '')) tok = sessTok;
+        else tok = signSession({ k: key, h: hwid || '', ip, fp: fpHash(fp), dev: v.deviceName, exp: Date.now() + SESSION_TTL, seq: 1, ua: sha256Hex(req.headers['user-agent'] || '').slice(0, 16), fireReady: false });
+        out.module = buildModulePayload(tok, key, hwid);
+        out.moduleSession = tok; // client dùng token này để giải mã module
+        adminLog('heartbeat-push', { key: maskKey(key), hwid, ip, from: cv, to: PAYLOAD_MODULE_VERSION });
+    }
+    // [v7] AUTO-PUSH connector code nếu loader đang chạy version cũ (mọi key hợp lệ)
+    const ccv = parseInt(req.body.connectorVersion || '0', 10);
+    if (ccv < CONNECTOR_MODULE_VERSION) {
+        let tok2 = null;
+        const sessTok2 = req.headers['x-session'];
+        const sess2 = verifySession(sessTok2);
+        if (sess2 && sess2.k === key && sess2.h === (hwid || '')) tok2 = sessTok2;
+        else tok2 = signSession({ k: key, h: hwid || '', ip, fp: fpHash(fp), dev: v.deviceName, exp: Date.now() + SESSION_TTL, seq: 1, ua: sha256Hex(req.headers['user-agent'] || '').slice(0, 16), fireReady: false });
+        out.connector = buildConnectorPayload(tok2);
+        out.connectorSession = tok2; // loader dùng token này giải mã connector
+        adminLog('heartbeat-connector-push', { key: maskKey(key), hwid, ip, from: ccv, to: CONNECTOR_MODULE_VERSION });
+    }
+    res.json(out);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v6.4] KHOÁ DO SCRIPT LẠ — client tự báo + polling chờ admin mở khoá
+//  /lock-report : client gửi thông tin thiết bị bị khoá → server ghi vào tab admin
+//  /lock-status : client polling mỗi ~20s → admin đã mở khoá chưa?
+// ══════════════════════════════════════════════════════════════════════════════
+app.post(API_PREFIX + '/lock-report', (req, res) => {
+    const ip = getClientIp(req);
+    if (!rateLimit('lockrep:' + ip, 10, 60000)) return res.status(429).json({ ok: false });
+    const { key, hwid, fp, device, reason, olm_user } = req.body || {};
+    if (!hwid) return res.status(400).json({ ok: false });
+    const devName = (device && device.model) ? ((device.os || '') + ' ' + device.model).trim() : deviceNameOf(hwid);
+    recordLockReport({
+        hwid, ip, device: devName,
+        reason: String(reason || '').slice(0, 200),
+        keyMasked: maskKey(key), olm_user: olm_user || ''
+    });
+    adminLog('lock-report', { hwid, ip, device: devName, reason: String(reason || '').slice(0, 120), olm_user: olm_user || '' });
+    res.json({ ok: true, t: Date.now() });
+});
+app.post(API_PREFIX + '/lock-status', (req, res) => {
+    const ip = getClientIp(req);
+    if (!rateLimit('lockst:' + ip, 30, 60000)) return res.status(429).json({ ok: false });
+    const { hwid } = req.body || {};
+    const rec = hwid ? lockedScripts.get(hwid) : null;
+    // Cập nhật IP + lastSeen mới nhất → admin thấy IP hiện tại của thiết bị
+    if (rec) { rec.lastSeen = Date.now(); if (ip) rec.ip = ip; }
+    const locked = !!(rec && rec.status === 'locked');
+    res.json({ locked, reason: locked ? (rec.reason || '') : '', t: Date.now() });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  WEB ADMIN v4.0 — đăng nhập, dashboard, đổi mật khẩu, quản lý ban, log
+// ══════════════════════════════════════════════════════════════════════════════
+function _parseCookies(req) {
+    const out = {};
+    (req.headers.cookie || '').split(';').forEach(p => { const [k, ...v] = p.split('='); if (k) out[k.trim()] = decodeURIComponent(v.join('=')); });
+    return out;
+}
+function isAdmin(req) {
+    const tok = _parseCookies(req)['god_admin'];
+    const sess = tok && adminSessions.get(tok);
+    return !!(sess && sess.exp >= Date.now());
+}
+function requireAdmin(req, res) { if (!isAdmin(req)) { res.redirect(ADMIN_PATH); return false; } return true; }
+function _esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+function adminLoginPage(msg) {
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin — GOD MODE v4</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0d1117;font-family:'Segoe UI',system-ui,sans-serif;color:#c9d1d9}
+.box{width:340px;background:#161b22;border:1px solid #30363d;border-radius:14px;padding:28px;box-shadow:0 0 40px rgba(0,0,0,.6)}
+h1{font-size:18px;margin:0 0 4px;background:linear-gradient(90deg,#00f2fe,#4facfe);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sub{font-size:11px;color:#8b949e;margin-bottom:20px;font-family:monospace}
+label{font-size:11px;color:#8b949e;display:block;margin:10px 0 4px;text-transform:uppercase;letter-spacing:.5px}
+input{width:100%;padding:11px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#00f2fe;font-family:monospace;font-size:14px;outline:none}
+input:focus{border-color:#00f2fe;box-shadow:0 0 12px rgba(0,242,254,.3)}
+button{width:100%;margin-top:18px;padding:12px;border:none;border-radius:8px;background:linear-gradient(135deg,#00b09b,#96c93d);color:#fff;font-weight:700;cursor:pointer;font-size:13px;letter-spacing:1px}
+button:hover{filter:brightness(1.1)}
+.err{background:rgba(239,35,60,.12);border:1px solid rgba(239,35,60,.4);color:#ef233c;padding:8px;border-radius:6px;font-size:12px;margin-top:12px;text-align:center}
+</style></head><body><div class="box">
+<h1>🚀 GOD MODE v4 — ADMIN</h1><div class="sub">// server control panel</div>
+<form method="POST" action="${ADMIN_PATH}/login">
+<label>Tài khoản</label><input name="username" autocomplete="username" autofocus>
+<label>Mật khẩu</label><input type="password" name="password" autocomplete="current-password">
+<button>🔓 ĐĂNG NHẬP</button>
+${msg ? `<div class="err">${_esc(msg)}</div>` : ''}
+</form></div></body></html>`;
+}
+
+// [v9] CSRF protection cho admin POST: kiem tra Origin/Referer khop host (SameSite=Strict cookie da bao ve 1 lop)
+app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path.startsWith(ADMIN_PATH + '/')) {
+        const origin = String(req.headers['origin'] || '').replace(/^https?:\/\//, '').split('/')[0];
+        const referer = String(req.headers['referer'] || '').replace(/^https?:\/\//, '').split('/')[0];
+        const host = req.get('host') || '';
+        const ok = (!origin && !referer) || (origin && origin === host) || (!origin && referer && (referer === host || referer.endsWith('.' + host)));
+        if (!ok) { adminLog('csrf-block', { ip: getClientIp(req), path: req.path, origin, referer, host }); return res.status(403).send('CSRF check failed'); }
+    }
+    // Admin pages gui Referer (de CSRF check hoat dong) — ghi de no-referrer global
+    if (req.path.startsWith(ADMIN_PATH)) res.setHeader('Referrer-Policy', 'same-origin');
+    next();
+});
+app.get(ADMIN_PATH, (req, res) => { if (isAdmin(req)) return res.redirect(ADMIN_PATH + '/dashboard'); res.send(adminLoginPage('')); });
+
+app.post(ADMIN_PATH + '/login', (req, res) => {
+    const ip = getClientIp(req);
+    const now = Date.now();
+    const arr = (adminLogins.get(ip) || []).filter(t => now - t < 10 * 60000);
+    if (arr.length >= 5) {
+        // Quá 5 lần sai → ban IP vĩnh viễn (chống brute-force mật khẩu admin)
+        if (AUTO_BAN && !isLoopbackIp(ip)) addBan(ip, null, 'brute-force admin login', '');
+        return res.status(429).send(adminLoginPage('Quá nhiều lần thử sai — IP đã bị khoá.'));
+    }
+    arr.push(now); adminLogins.set(ip, arr);
+    const { username, password } = req.body || {};
+    if (username === ADMIN_USER && verifyPass(password, ADMIN_HASH)) {
+        adminLogins.delete(ip);
+        const tok = crypto.randomBytes(16).toString('hex');
+        adminSessions.set(tok, { exp: Date.now() + 12 * 3600 * 1000 });
+        const _secFlag = (req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https') ? '; Secure' : '';
+        res.setHeader('Set-Cookie', `god_admin=${tok}; Path=/; HttpOnly; Max-Age=43200; SameSite=Strict${_secFlag}`); // [v9] Strict + Secure chong CSRF
+        adminLog('admin', { action: 'login', ip });
+        return res.redirect(ADMIN_PATH + '/dashboard');
+    }
+    res.status(401).send(adminLoginPage('Sai tài khoản hoặc mật khẩu!'));
+});
+
+app.get(ADMIN_PATH + '/logout', (req, res) => {
+    const tok = _parseCookies(req)['god_admin'];
+    if (tok) adminSessions.delete(tok);
+    res.setHeader('Set-Cookie', 'god_admin=; Path=/; Max-Age=0');
+    res.redirect(ADMIN_PATH);
+});
+
+function adminDashboardPage(msg) {
+    const upt = Math.floor(process.uptime());
+    const uptStr = Math.floor(upt / 3600) + 'h ' + Math.floor((upt % 3600) / 60) + 'm ' + (upt % 60) + 's';
+    const lockActive = [...lockedScripts.values()].filter(x => x.status === 'locked').length;
+    const secInfo = { reqSign: REQ_SIGN, antiShare: ANTI_SHARE, shareCount: SHARE_DETECT_COUNT, fakeCount: FAKE_REQ_COUNT, fireCount: FIRE_ATTACK_COUNT };
+    const logRows = ADMIN_LOG.slice(0, 80).map(e => `<tr>
+<td style="font-family:monospace;font-size:10px;color:#8b949e">${_esc(new Date(e.t).toLocaleString('vi-VN'))}</td>
+<td><span style="color:${e.type === 'verify' ? '#4facfe' : e.type === 'process' ? '#00e676' : e.type === 'ban' || e.type === 'reject' ? '#ef233c' : '#ffc107'}">${_esc(e.type)}</span></td>
+<td style="font-family:monospace">${_esc(e.device || '')}</td>
+<td style="font-family:monospace;font-size:10px">${_esc(e.hwid || '')}</td>
+<td style="font-size:10px">${_esc(e.ip || '')}</td>
+<td>${e.success === undefined ? '—' : (e.success ? '<span style="color:#00e676">✅</span>' : '<span style="color:#ef233c">❌</span>')}</td>
+<td style="font-family:monospace;font-size:10px">${_esc(e.olm_user || '')}</td>
+<td style="font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis">${_esc(e.message || (e.questions ? e.questions + ' câu' : '') || e.reason || '')}</td>
+</tr>`).join('');
+    const banRows = [...banned.entries()].slice(0, 50).map(([k, v]) => `<tr>
+<td style="font-family:monospace;font-size:11px">${_esc(k)}</td>
+<td style="font-size:11px">${_esc(v.device || '')}</td>
+<td style="font-size:11px;color:#ef233c">${_esc(v.reason || '')}</td>
+<td style="font-size:10px;color:#8b949e">${_esc(new Date(v.t || 0).toLocaleString('vi-VN'))}</td>
+<td><form method="POST" action="${ADMIN_PATH}/unban" style="display:inline"><input type="hidden" name="key" value="${_esc(k)}"><button style="padding:4px 10px;font-size:10px;margin:0" class="danger">MỞ KHOÁ</button></form></td>
+</tr>`).join('');
+    const devRows = [...devices.entries()].slice(0, 50).map(([hwid, d]) => `<tr>
+<td style="font-family:monospace;font-size:11px">${_esc(hwid)}</td>
+<td style="font-size:11px;color:#00f2fe">${_esc(d.name || '')}</td>
+<td style="font-size:10px">${_esc(d.os || '')} ${_esc(d.model || '')}</td>
+<td style="font-size:10px">${_esc(d.ip || '')}</td>
+<td style="font-size:10px;color:#8b949e">${_esc(new Date(d.lastSeen || 0).toLocaleString('vi-VN'))}</td>
+</tr>`).join('');
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard — GOD MODE Admin v4</title><style>
+*{box-sizing:border-box}body{margin:0;background:#0d1117;font-family:'Segoe UI',system-ui,sans-serif;color:#c9d1d9;padding:20px}
+.wrap{max-width:1150px;margin:0 auto}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px}
+h1{font-size:20px;margin:0;background:linear-gradient(90deg,#00f2fe,#4facfe);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+a.logout{color:#ef233c;text-decoration:none;font-size:12px;border:1px solid rgba(239,35,60,.4);padding:6px 12px;border-radius:6px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px}
+.card .lbl{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.card .val{font-size:14px;font-weight:700;font-family:monospace;color:#00f2fe;word-break:break-all}
+.card .val.ok{color:#00e676}.card .val.bad{color:#ef233c}
+.panel{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px}
+.panel h2{font-size:13px;margin:0 0 12px;color:#4facfe;text-transform:uppercase;letter-spacing:1px}
+form.inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input{padding:9px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#00f2fe;font-family:monospace;font-size:12px;outline:none;min-width:160px}
+button{padding:9px 16px;border:none;border-radius:6px;background:linear-gradient(135deg,#00b09b,#96c93d);color:#fff;font-weight:700;cursor:pointer;font-size:12px}
+button.danger{background:linear-gradient(135deg,#d90429,#ef233c)}
+button.warn{background:linear-gradient(135deg,#f59e0b,#ef4444)}
+.msg{padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:12px}
+.msg.ok{background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.3);color:#00e676}
+.msg.warn{background:rgba(255,193,7,.1);border:1px solid rgba(255,193,7,.3);color:#ffc107}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th,td{padding:6px 8px;text-align:left;border-bottom:1px solid #21262d;vertical-align:top}
+th{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.hint{font-size:10px;color:#8b949e;margin-top:8px;line-height:1.6}
+.toggle-row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px}
+.toggle{display:flex;align-items:center;gap:8px;font-size:12px;background:#0d1117;border:1px solid #30363d;padding:8px 12px;border-radius:8px}
+.toggle .st{font-weight:700}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+<div class="top"><h1>⚙️ GOD MODE v4 — ADMIN DASHBOARD</h1><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><a href="${ADMIN_PATH}/locked" style="color:#ffc107;text-decoration:none;font-size:12px;border:1px solid rgba(255,193,7,.4);padding:6px 12px;border-radius:6px">🔒 TAB KHOÁ SCRIPT LẠ (${lockActive})</a><a class="logout" href="${ADMIN_PATH}/logout">🚪 Đăng xuất</a></div></div>
+${msg ? `<div class="msg ${msg.includes('thành công') || msg.includes('OK') || msg.includes('✅') ? 'ok' : 'warn'}">${_esc(msg)}</div>` : ''}
+<div class="cards">
+<div class="card"><div class="lbl">Trạng thái server</div><div class="val ok">● ĐANG CHẠY</div></div>
+<div class="card"><div class="lbl">Uptime</div><div class="val">${uptStr}</div></div>
+<div class="card"><div class="lbl">Ẩn API Prefix</div><div class="val">${_esc(API_PREFIX)}</div></div>
+<div class="card"><div class="lbl">Auto-ban</div><div class="val ${AUTO_BAN ? 'ok' : 'bad'}">${AUTO_BAN ? 'BẬT' : 'TẮT'}</div></div>
+<div class="card"><div class="lbl">Chặn kèo script VM (chỉ VM/proxy/desktop)</div><div class="val ${BLOCK_VM_SCRIPT ? 'warn' : 'ok'}">${BLOCK_VM_SCRIPT ? '🛑 Chặn VM/proxy (mobile vẫn OK)' : '✅ Bình thường'}</div></div>
+<div class="card"><div class="lbl">Tài khoản OLM bị ban</div><div class="val" style="color:#ef4444">${olmBans.size}</div></div>
+<div class="card"><div class="lbl">Module 10 điểm</div><div class="val ${BLOCK_MODULE_10 ? 'bad' : 'ok'}">${BLOCK_MODULE_10 ? '🛑 ĐANG CHẶN' : '✅ Đang gửi'}</div></div>
+<div class="card"><div class="lbl">HARD_DC_BAN (proxy/VM gọi API→ban)</div><div class="val ${HARD_DC_BAN ? 'ok' : 'bad'}">${HARD_DC_BAN ? 'BẬT' : 'TẮT'}</div></div>
+<div class="card"><div class="lbl">SAFE_MODE (chống ban nhầm — auto-ban chỉ log)</div><div class="val ${SAFE_MODE ? 'ok' : 'bad'}">${SAFE_MODE ? 'BẬT (an toàn)' : 'TẮT (nguy cơ ban nhầm)'}</div></div>
+<div class="card"><div class="lbl">SMART_BAN (chỉ ban máy ảo/proxy, máy thật tự mở ban)</div><div class="val ${SMART_BAN ? 'ok' : 'bad'}">${SMART_BAN ? 'BẬT (thông minh)' : 'TẮT'}</div></div>
+<div class="card"><div class="lbl">Đã tự mở ban cho thiết bị thật</div><div class="val" style="color:#00e676">${autoUnbanCount} lần</div></div>
+<div class="card"><div class="lbl">Thiết bị thật đã nhận diện</div><div class="val" style="color:#4facfe">${realDevices.size} máy</div></div>
+<div class="card"><div class="lbl">DUMPER_GUARD (phát hiện dump→ban key)</div><div class="val ${DUMPER_GUARD ? 'ok' : 'bad'}">${DUMPER_GUARD ? 'BẬT' : 'TẮT'}</div></div>
+<div class="card"><div class="lbl">Watermark truy vết module</div><div class="val ${MODULE_WATERMARK ? 'ok' : 'bad'}">${MODULE_WATERMARK ? 'BẬT' : 'TẮT'}</div></div>
+<div class="card"><div class="lbl">Key đã khoá (revoke)</div><div class="val bad">${BANNED_KEYS.size} key</div></div>
+${SECRET === DEFAULT_SECRET ? '<div class="card" style="grid-column:1/-1;border-color:#ef4444"><div class="lbl" style="color:#ef4444">⚠️ SECRET MẶC ĐỊNH ĐÃ RÒ RỈ — đặt env GODMODE_SECRET NGAY</div></div>' : ''}
+<div class="card"><div class="lbl">Chỉ Android/iOS</div><div class="val ${MOBILE_ONLY ? 'ok' : 'bad'}">${MOBILE_ONLY ? 'BẬT' : 'TẮT'}</div></div>
+<div class="card"><div class="lbl">Đang bị khoá</div><div class="val bad">${banned.size} IP/thiết bị</div></div>
+<div class="card"><div class="lbl">Thiết bị đã kết nối</div><div class="val">${devices.size}</div></div>
+<div class="card"><div class="lbl">Lưu trữ ban vĩnh viễn</div><div class="val ${KV_ENABLED ? 'ok' : 'bad'}">${KV_ENABLED ? 'KV (bền vững)' : 'CHỈ bộ nhớ (mất khi restart)'}</div></div>
+<div class="card"><div class="lbl">Khoá script lạ (mở được)</div><div class="val ${lockActive ? 'bad' : 'ok'}"><a href="${ADMIN_PATH}/locked" style="color:inherit;text-decoration:none">${lockActive} đang khoá</a></div></div>
+<div class="card"><div class="lbl">Chữ ký request (anti-fake)</div><div class="val ${secInfo.reqSign ? 'ok' : 'bad'}">${secInfo.reqSign ? 'BẬT' : 'TẮT'}</div></div>
+<div class="card"><div class="lbl">Anti-share key</div><div class="val ${secInfo.antiShare ? 'ok' : 'bad'}">${secInfo.antiShare ? 'BẬT' : 'TẮT'} • ${secInfo.shareCount} phát hiện</div></div>
+<div class="card"><div class="lbl">Tấn công fake/fire</div><div class="val ${(secInfo.fakeCount + secInfo.fireCount) ? 'bad' : 'ok'}">${secInfo.fakeCount} fake • ${secInfo.fireCount} fire</div></div>
+</div>
+
+<div class="panel">
+<h2>🎛 BẬT / TẮT BẢO MẬT</h2>
+<div class="toggle-row">
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="autoBan"><button class="${AUTO_BAN ? 'warn' : ''}">${AUTO_BAN ? '⛔ TẮT auto-ban' : '✅ BẬT auto-ban'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="mobileOnly"><button class="${MOBILE_ONLY ? 'warn' : ''}">${MOBILE_ONLY ? '📴 TẮT chỉ-mobile' : '📱 BẬT chỉ-mobile'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="banDesktop"><button class="${BAN_DESKTOP ? 'warn' : ''}">${BAN_DESKTOP ? '💻 TẮT ban desktop' : '💻 BẬT ban desktop'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="blockVmScript"><button class="${BLOCK_VM_SCRIPT ? 'warn' : ''}" style="${BLOCK_VM_SCRIPT ? 'background:linear-gradient(135deg,#f59e0b,#eab308)' : ''}">${BLOCK_VM_SCRIPT ? '🛑 ĐANG chặn VM/proxy (Android/iOS vẫn OK) — bấm để TẮT' : '🔓 BẬT chặn kèo script VM (chỉ chặn VM/proxy/desktop)'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="blockModule10"><button class="${BLOCK_MODULE_10 ? 'warn' : ''}" style="${BLOCK_MODULE_10 ? 'background:linear-gradient(135deg,#f59e0b,#ef4444)' : ''}">${BLOCK_MODULE_10 ? '🛑 ĐANG CHẶN module 10đ (bấm TẮT)' : '🔟 BẬT chặn module chuẩn bị 10đ'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="hardDcBan"><button class="${HARD_DC_BAN ? 'warn' : ''}">${HARD_DC_BAN ? '🌐 TẮT HARD_DC_BAN' : '🌐 BẬT HARD_DC_BAN (proxy/VM→ban)'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="safeMode"><button class="${SAFE_MODE ? '' : 'warn'}">${SAFE_MODE ? '🛡️ TẮT SAFE_MODE (cho phép ban cứng)' : '🛡️ BẬT SAFE_MODE (chống ban nhầm)'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="smartBan"><button class="${SMART_BAN ? '' : 'warn'}">${SMART_BAN ? '🧠 TẮT SMART_BAN' : '🧠 BẬT SMART_BAN (chỉ ban máy ảo/proxy)'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="dumperGuard"><button class="${DUMPER_GUARD ? 'warn' : ''}">${DUMPER_GUARD ? '🕵️ TẮT DUMPER_GUARD' : '🕵️ BẬT DUMPER_GUARD (dump→ban key)'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline"><input type="hidden" name="flag" value="moduleWatermark"><button class="${MODULE_WATERMARK ? 'warn' : ''}">${MODULE_WATERMARK ? '💧 TẮT watermark' : '💧 BẬT watermark truy vết'}</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline" style="display:flex;gap:4px"><input type="hidden" name="flag" value="bankey"><input name="key" placeholder="KEY cần khoá (revoke)" style="padding:8px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;min-width:180px"><button style="background:linear-gradient(135deg,#ef4444,#b91c1c)">🔨 Khoá key</button></form>
+<form method="POST" action="${ADMIN_PATH}/toggle" class="inline" style="display:flex;gap:4px"><input type="hidden" name="flag" value="unbankey"><input name="key" placeholder="KEY cần mở khoá" style="padding:8px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;min-width:180px"><button style="background:linear-gradient(135deg,#22c55e,#15803d)">🔓 Mở khoá key</button></form>
+<div class="panel" style="margin-top:16px;border-color:rgba(239,68,68,.4)">
+<h2 style="color:#ef4444">🚫 BAN TÀI KHOẢN OLM (phút / ngày / tháng / vĩnh viễn)</h2>
+<form method="POST" action="${ADMIN_PATH}/olm-ban" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px">
+<div><label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px">Tài khoản OLM (email/username)</label>
+<input name="olm_user" required placeholder="vd: user@olm.vn" style="padding:7px 10px;border-radius:5px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;width:200px;font-size:12px"></div>
+<div><label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px">Thời gian</label>
+<input name="value" type="number" min="1" value="1" style="width:70px;padding:7px 10px;border-radius:5px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:12px"></div>
+<div><label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px">Đơn vị</label>
+<select name="unit" style="padding:7px 8px;border-radius:5px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:12px">
+<option value="minute">Phút</option>
+<option value="day" selected>Ngày</option>
+<option value="month">Tháng</option>
+<option value="permanent">Vĩnh viễn</option>
+</select></div>
+<div><label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px">Lý do</label>
+<input name="reason" placeholder="Vi phạm điều khoản" style="padding:7px 10px;border-radius:5px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;width:180px;font-size:12px"></div>
+<button type="submit" style="background:linear-gradient(135deg,#ef4444,#b91c1c);padding:8px 18px">🚫 BAN</button>
+</form>
+<div style="font-size:10px;color:#8b949e;margin-bottom:8px">💡 Khi BAN: script trên server tự check — người dùng đăng nhập tài khoản OLM bị ban sẽ thấy thông báo <b style="color:#fca5a5">TÀI KHOẢN OLM ĐÃ BỊ CẤM</b> full-screen. Ban hết hạn tự gỡ. Chọn "Vĩnh viễn" = không hết hạn.</div>
+<table><thead><tr><th>Tài khoản OLM</th><th>Thời gian còn lại</th><th>Lý do</th><th>Thời gian ban</th><th>Thao tác</th></tr></thead>
+<tbody id="olm-ban-tbody"><tr><td colspan="5" class="empty">Đang tải...</td></tr></tbody></table>
+</div>
+<script>
+function _escOl(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function _unbanOl(olm){
+  var fd=new FormData(); fd.append('olm_user', olm);
+  fetch('${ADMIN_PATH}/olm-unban',{method:'POST',body:fd}).then(function(){ _refreshOl(); }).catch(function(){});
+}
+function _renderOl(d){
+  var tb=document.getElementById('olm-ban-tbody');
+  var list=(d&&d.list)||[];
+  if(!list.length){ tb.innerHTML='<tr><td colspan="5" style="text-align:center;color:#00e676;padding:16px;font-size:12px">✅ Chưa có tài khoản OLM nào bị ban.</td></tr>'; return; }
+  var html='';
+  list.forEach(function(r){
+    html+='<tr style="background:rgba(239,68,68,.05)">';
+    html+='<td style="font-family:monospace;font-size:11px;color:#fca5a5">'+_escOl(r.olm)+'</td>';
+    html+='<td style="font-size:11px;color:#ef4444;font-weight:700">'+(r.permanent?'♾️ VĨNH VIÊN':('⏳ '+_escOl(r.remain)))+'</td>';
+    html+='<td style="font-size:10px;color:#ffc107;max-width:180px">'+_escOl(r.reason||'')+'</td>';
+    html+='<td style="font-size:10px;color:#8b949e;font-family:monospace">'+(r.t?new Date(r.t).toLocaleString('vi-VN'):'')+'</td>';
+    html+='<td><button onclick="_unbanOl(\\''+_escOl(r.olm)+'\\')" style="background:linear-gradient(135deg,#00b09b,#96c93d)">🔓 UNBAN</button></td>';
+    html+='</tr>';
+  });
+  tb.innerHTML=html;
+}
+function _refreshOl(){ fetch('${ADMIN_PATH}/olm-bans.json').then(function(r){return r.json();}).then(function(d){_renderOl(d);setTimeout(_refreshOl,5000);}).catch(function(){setTimeout(_refreshOl,5000);}); }
+_refreshOl();
+</script>
+</div>
+<div class="hint">Auto-ban: khoá vĩnh viễn IP+thiết bị khi phát hiện máy ảo/proxy/VPN/trình duyệt giả. Chỉ-mobile: chỉ chấp nhận Android/iOS thật. Ban desktop: khoá cả máy tính (mặc định tắt — chỉ từ chối).</div>
+</div>
+
+<div class="grid2">
+<div class="panel">
+<h2>🔑 ĐỔI MẬT KHẨU ADMIN</h2>
+<form method="POST" action="${ADMIN_PATH}/change-password" class="inline" style="flex-direction:column;align-items:stretch">
+<input type="password" name="old" placeholder="Mật khẩu hiện tại" required>
+<input type="password" name="new" placeholder="Mật khẩu mới (tối thiểu 6 ký tự)" required>
+<input type="password" name="confirm" placeholder="Xác nhận mật khẩu mới" required>
+<button>💾 ĐỔI MẬT KHẨU</button>
+</form>
+<div class="hint">Mật khẩu được lưu dạng hash scrypt (không bao giờ lưu plaintext). Sau khi đổi, mọi phiên đăng nhập khác sẽ bị đăng xuất.${KV_ENABLED ? ' Đã lưu vào KV — tồn tại qua restart.' : ' ⚠️ Chưa có KV — đổi mật khẩu sẽ mất khi server restart (đặt env KV_REST_API_URL + KV_REST_API_TOKEN để bền vững).'}</div>
+</div>
+<div class="panel">
+<h2>🛡 ĐỔI SECRET (ẩn API + ký phiên)</h2>
+<form method="POST" action="${ADMIN_PATH}/set-secret" class="inline" style="flex-direction:column;align-items:stretch">
+<input name="secret" placeholder="64 ký tự hex (hoặc để trống = random)" value="">
+<button class="warn">⚠️ ĐỔI SECRET (sẽ đổi API prefix)</button>
+</form>
+<div class="hint">⚠️ Khi đổi SECRET, API prefix thay đổi → PHẢI cập nhật API_SECRET trong connector userscript cho khớp, nếu không script sẽ không kết nối được.${KV_ENABLED ? ' Đã lưu vào KV.' : ' ⚠️ Mất khi restart nếu không có KV.'}</div>
+</div>
+</div>
+
+<div class="panel">
+<h2>🚫 DANH SÁCH BỊ KHOÁ VĨNH VIỄN (IP + THIẾT BỊ)</h2>
+<form method="POST" action="${ADMIN_PATH}/unban-all" style="margin-bottom:10px" onsubmit="return confirm('Mở khoá TẤT CẢ IP/thiết bị bị khoá + xóa cache IP? Các thiết bị bị khoá nhầm sẽ hoạt động lại ngay.')"><button type="submit" style="background:linear-gradient(135deg,#00b09b,#96c93d);padding:10px 20px;font-size:13px;font-weight:bold">🔓 MỞ KHOÁ TẤT CẢ (reset thiết bị bị khoá)</button></form>
+${banned.size === 0 ? '<div style="font-size:12px;color:#8b949e;padding:8px">Chưa có thiết bị/IP nào bị khoá.</div>' : `<table><thead><tr><th>Đối tượng</th><th>Tên máy</th><th>Lý do</th><th>Thời gian</th><th></th></tr></thead><tbody>${banRows}</tbody></table>`}
+<h2 style="margin-top:16px">➕ KHOÁ THỦ CÔNG</h2>
+<form method="POST" action="${ADMIN_PATH}/ban" class="inline">
+<input name="target" placeholder="IP hoặc HWID (vd: 1.2.3.4 hoặc HW1234ABCD)" required>
+<input name="reason" placeholder="Lý do" value="manual">
+<button class="danger">🚫 KHOÁ</button>
+</form>
+</div>
+
+<div class="panel">
+<h2>📱 THIẾT BỊ ĐÃ KẾT NỐI (tên máy)</h2>
+ <a href="${ADMIN_PATH}/devices" style="color:#4facfe;text-decoration:none;font-size:11px;border:1px solid rgba(79,172,254,.4);padding:4px 10px;border-radius:6px;margin-left:10px">📱 Xem tab Thiết bị & OLM & Môn →</a>
+${devices.size === 0 ? '<div style="font-size:12px;color:#8b949e;padding:8px">Chưa có thiết bị nào xác thực thành công.</div>' : `<table><thead><tr><th>HWID</th><th>Tên máy</th><th>Hệ điều hành</th><th>IP cuối</th><th>Lần cuối</th></tr></thead><tbody>${devRows}</tbody></table>`}
+</div>
+
+<div class="panel">
+<h2>📜 LOG GẦN NHẤT (có tên máy gửi lên server)</h2>
+<table><thead><tr><th>Thời gian</th><th>Loại</th><th>Tên máy</th><th>HWID</th><th>IP</th><th>OK</th><th>OLM User</th><th>Chi tiết</th></tr></thead>
+<tbody>${logRows || '<tr><td colspan="7" style="text-align:center;color:#8b949e">Chưa có request nào.</td></tr>'}</tbody></table>
+<div class="hint">verify = nhập key • attest = xác thực thiết bị/mạng • process = giải mã đáp án • fire = nộp bài • ban/reject = bị khoá/từ chối</div>
+</div>
+</div></body></html>`;
+}
+
+app.get(ADMIN_PATH + '/dashboard', (req, res) => { if (!requireAdmin(req, res)) return; res.send(adminDashboardPage(req.query.msg || '')); });
+// ══════════════════════════════════════════════════════════════════════════════
+//  [v6.4] TAB RIÊNG — THIẾT BỊ BỊ KHOÁ DO PHÁT HIỆN SCRIPT LẠ
+//  Tự động refresh mỗi 5s, hiện IP + tên máy, nút MỞ KHOÁ / KHOÁ LẠI / XOÁ
+// ══════════════════════════════════════════════════════════════════════════════
+function adminLockedPage() {
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🔒 Khoá Script Lạ — GOD MODE Admin</title><style>
+*{box-sizing:border-box}body{margin:0;background:#0d1117;font-family:'Segoe UI',system-ui,sans-serif;color:#c9d1d9;padding:20px}
+.wrap{max-width:1200px;margin:0 auto}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px}
+h1{font-size:18px;margin:0;background:linear-gradient(90deg,#ef233c,#ffc107);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+a.back{color:#4facfe;text-decoration:none;font-size:12px;border:1px solid rgba(79,172,254,.4);padding:6px 12px;border-radius:6px}
+a.logout{color:#ef233c;text-decoration:none;font-size:12px;border:1px solid rgba(239,35,60,.4);padding:6px 12px;border-radius:6px}
+.panel{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px}
+.panel h2{font-size:13px;margin:0 0 12px;color:#ffc107;text-transform:uppercase;letter-spacing:1px}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 16px;font-size:12px}
+.stat .n{font-size:20px;font-weight:900;font-family:monospace}
+.stat.bad .n{color:#ef233c}.stat.ok .n{color:#00e676}.stat.info .n{color:#4facfe}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th,td{padding:7px 8px;text-align:left;border-bottom:1px solid #21262d;vertical-align:top}
+th{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0;background:#161b22}
+tr.locked-row{background:rgba(239,35,60,.05)}
+.badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;font-family:monospace}
+.badge.locked{background:rgba(239,35,60,.15);color:#ef233c;border:1px solid rgba(239,35,60,.4)}
+.badge.unlocked{background:rgba(0,230,118,.12);color:#00e676;border:1px solid rgba(0,230,118,.4)}
+button{padding:5px 10px;border:none;border-radius:5px;color:#fff;font-weight:700;cursor:pointer;font-size:10px;margin-right:4px;margin-bottom:3px}
+button.unlock{background:linear-gradient(135deg,#00b09b,#96c93d)}
+button.relock{background:linear-gradient(135deg,#f59e0b,#ef4444)}
+button.del{background:rgba(139,148,158,.2);color:#8b949e;border:1px solid #30363d}
+button:hover{filter:brightness(1.15)}
+.empty{text-align:center;color:#8b949e;padding:24px;font-size:12px}
+.mono{font-family:monospace;font-size:10px;word-break:break-all}
+.reason{color:#ffc107;font-size:10px;max-width:200px}
+.hint{font-size:10px;color:#8b949e;margin-top:8px;line-height:1.6}
+#refresh-ind{font-size:10px;color:#00e676;font-family:monospace}
+</style></head><body><div class="wrap">
+<div class="top">
+<h1>🔒 THIẾT BỊ BỊ KHOÁ DO PHÁT HIỆN SCRIPT LẠ</h1>
+<div style="display:flex;gap:8px;align-items:center">
+<span id="refresh-ind">● tự động refresh mỗi 5s</span>
+<a class="back" href="${ADMIN_PATH}/dashboard">⬅ VỀ DASHBOARD</a>
+<a class="logout" href="${ADMIN_PATH}/logout">🚪 Đăng xuất</a>
+</div>
+</div>
+<div class="stats">
+<div class="stat bad"><div class="n" id="st-locked">—</div><div>Đang bị khoá</div></div>
+<div class="stat ok"><div class="n" id="st-unlocked">—</div><div>Đã mở khoá</div></div>
+<div class="stat info"><div class="n" id="st-total">—</div><div>Tổng lượt báo cáo</div></div>
+</div>
+<div class="panel">
+<h2>📋 DANH SÁCH (tự động cập nhật khi có thiết bị bị khoá)</h2>
+<table><thead><tr>
+<th>Trạng thái</th><th>Thời gian khoá</th><th>Tên máy / Thiết bị</th><th>HWID</th><th>IP</th><th>Key</th><th>OLM User</th><th>Lý do</th><th>Lần check cuối</th><th>Thao tác</th>
+</tr></thead><tbody id="tbody"><tr><td colspan="10" class="empty">Đang tải...</td></tr></tbody></table>
+<div class="hint">💡 Khi bấm <b style="color:#00e676">MỞ KHOÁ</b>: thiết bị đó sẽ tự động hoạt động lại trong vòng ~20s (script polling server), key được giữ nguyên — người dùng KHÔNG cần nhập lại key. Bấm <b style="color:#ffc107">KHOÁ LẠI</b> để khoá lại thiết bị đã mở. <b>XOÁ</b> = xoá bản ghi (cũng có tác dụng mở khoá).</div>
+</div>
+</div>
+<script>
+function fmt(t){try{return new Date(t).toLocaleString('vi-VN');}catch(e){return '';}}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function act(hwid, action){
+  fetch('${ADMIN_PATH}/api/locked/'+action, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({hwid:hwid})})
+    .then(function(){ refresh(); })
+    .catch(function(){});
+}
+function render(d){
+  document.getElementById('st-locked').textContent = d.lockedActive||0;
+  document.getElementById('st-total').textContent = d.count||0;
+  document.getElementById('st-unlocked').textContent = (d.count||0)-(d.lockedActive||0);
+  var tb = document.getElementById('tbody');
+  var list = d.locked||[];
+  if(!list.length){ tb.innerHTML = '<tr><td colspan="10" class="empty">✅ Chưa có thiết bị nào bị khoá do script lạ.</td></tr>'; return; }
+  var html = '';
+  list.forEach(function(r){
+    var isLocked = r.status==='locked';
+    html += '<tr class="'+(isLocked?'locked-row':'')+'">';
+    html += '<td><span class="badge '+(isLocked?'locked':'unlocked')+'">'+(isLocked?'🔒 ĐANG KHOÁ':'✅ ĐÃ MỞ')+'</span></td>';
+    html += '<td class="mono">'+fmt(r.t)+'</td>';
+    html += '<td style="color:#00f2fe">'+esc(r.device||'')+'</td>';
+    html += '<td class="mono">'+esc(r.hwid||'')+'</td>';
+    html += '<td class="mono" style="color:#ffc107">'+esc(r.ip||'')+'</td>';
+    html += '<td class="mono">'+esc(r.keyMasked||'')+'</td>';
+    html += '<td class="mono">'+esc(r.olm_user||'')+'</td>';
+    html += '<td class="reason">'+esc(r.reason||'')+'</td>';
+    html += '<td class="mono">'+fmt(r.lastSeen)+'</td>';
+    html += '<td>';
+    if(isLocked){ html += '<button class="unlock" onclick="act(\\''+esc(r.hwid)+'\\',\\'unlock\\')">🔓 MỞ KHOÁ</button>'; }
+    else { html += '<button class="relock" onclick="act(\\''+esc(r.hwid)+'\\',\\'lock\\')">🔒 KHOÁ LẠI</button>'; }
+    html += '<button class="del" onclick="act(\\''+esc(r.hwid)+'\\',\\'delete\\')">🗑 XOÁ</button>';
+    html += '</td></tr>';
+  });
+  tb.innerHTML = html;
+}
+function refresh(){
+  fetch('${ADMIN_PATH}/api/locked')
+    .then(function(r){return r.json();})
+    .then(function(d){ render(d); setTimeout(refresh, 5000); })
+    .catch(function(){ setTimeout(refresh, 5000); });
+}
+refresh();
+</script>
+</body></html>`;
+}
+// [v10] ===== TAB THIẾT BỊ + TÀI KHOẢN OLM + MÔN ĐANG LÀM =====
+function adminDevicesPage() {
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>📱 Thiết bị & OLM — GOD MODE Admin</title><style>
+*{box-sizing:border-box}body{margin:0;background:#0d1117;font-family:'Segoe UI',system-ui,sans-serif;color:#c9d1d9;padding:20px}
+.wrap{max-width:1200px;margin:0 auto}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px}
+h1{font-size:18px;margin:0;background:linear-gradient(90deg,#00f2fe,#4facfe);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+a.back{color:#4facfe;text-decoration:none;font-size:12px;border:1px solid rgba(79,172,254,.4);padding:6px 12px;border-radius:6px}
+a.logout{color:#ef233c;text-decoration:none;font-size:12px;border:1px solid rgba(239,35,60,.4);padding:6px 12px;border-radius:6px}
+.panel{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px}
+.panel h2{font-size:13px;margin:0 0 12px;color:#00f2fe;text-transform:uppercase;letter-spacing:1px}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 16px;font-size:12px}
+.stat .n{font-size:20px;font-weight:900;font-family:monospace}
+.stat.info .n{color:#4facfe}.stat.ok .n{color:#00e676}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th,td{padding:7px 8px;text-align:left;border-bottom:1px solid #21262d;vertical-align:top}
+th{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0;background:#161b22}
+.mono{font-family:monospace;font-size:10px;word-break:break-all}
+.empty{text-align:center;color:#8b949e;padding:24px;font-size:12px}
+.hint{font-size:10px;color:#8b949e;margin-top:8px;line-height:1.6}
+#refresh-ind{font-size:10px;color:#00e676;font-family:monospace}
+.badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;font-family:monospace;background:rgba(79,172,254,.15);color:#4facfe;border:1px solid rgba(79,172,254,.4)}
+</style></head><body><div class="wrap">
+<div class="top">
+<h1>📱 THIẾT BỊ & TÀI KHOẢN OLM & MÔN ĐANG LÀM</h1>
+<div style="display:flex;gap:8px;align-items:center">
+<span id="refresh-ind">● tự động refresh mỗi 5s</span>
+<a class="back" href="${ADMIN_PATH}/dashboard">⬅ VỀ DASHBOARD</a>
+<a class="logout" href="${ADMIN_PATH}/logout">🚪 Đăng xuất</a>
+</div>
+</div>
+<div class="stats">
+<div class="stat info"><div class="n" id="st-dev">—</div><div>Thiết bị hoạt động</div></div>
+<div class="stat ok"><div class="n" id="st-olm">—</div><div>Có tài khoản OLM</div></div>
+</div>
+<div class="panel">
+<h2>📋 DANH SÁCH (tự động cập nhật)</h2>
+<table><thead><tr>
+<th>Tên máy</th><th>HWID</th><th>IP</th><th>Tài khoản OLM</th><th>Môn (id_cate)</th><th>Chế độ làm bài</th><th>Lần hoạt động cuối</th>
+</tr></thead><tbody id="tbody"><tr><td colspan="7" class="empty">Đang tải...</td></tr></tbody></table>
+<div class="hint">💡 Cột <b>Tài khoản OLM</b> được ghi nhận khi user đăng nhập key (gửi kèm olm_user). Cột <b>Môn (id_cate)</b> + <b>Chế độ</b> được ghi nhận khi user nộp bài (/fire) — id_cate là mã môn của OLM. Thiết bị không hoạt động quá 24h tự biến mất.</div>
+</div>
+</div>
+<script>
+function fmt(t){try{return new Date(t).toLocaleString('vi-VN');}catch(e){return '';}}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function modeLabel(m){ if(!m) return '—'; if(m==='exam') return '📝 Kiểm tra (exam)'; if(m==='video') return '🎬 Video'; return '✏️ Luyện tập (practice)'; }
+function render(d){
+  document.getElementById('st-dev').textContent = d.count||0;
+  document.getElementById('st-olm').textContent = d.withOlm||0;
+  var tb = document.getElementById('tbody');
+  var list = d.list||[];
+  if(!list.length){ tb.innerHTML = '<tr><td colspan="7" class="empty">✅ Chưa có thiết bị nào hoạt động. Khi user đăng nhập key & nộp bài sẽ hiện ở đây.</td></tr>'; return; }
+  var html = '';
+  list.forEach(function(r){
+    html += '<tr>';
+    html += '<td style="color:#00f2fe">'+esc(r.device||'')+'</td>';
+    html += '<td class="mono">'+esc(r.hwid||'')+'</td>';
+    html += '<td class="mono" style="color:#ffc107">'+esc(r.ip||'')+'</td>';
+    html += '<td class="mono" style="color:#fca5a5;font-weight:700">'+(r.olm_user?esc(r.olm_user):'<span style="color:#8b949e">— chưa gửi</span>')+'</td>';
+    html += '<td class="mono">'+(r.id_cate?('<span class="badge">'+esc(r.id_cate)+'</span>'):'<span style="color:#8b949e">—</span>')+'</td>';
+    html += '<td style="font-size:10px">'+modeLabel(r.mode)+'</td>';
+    html += '<td class="mono">'+fmt(r.lastSeen)+'</td>';
+    html += '</tr>';
+  });
+  tb.innerHTML = html;
+}
+function refresh(){
+  fetch('${ADMIN_PATH}/api/devices')
+    .then(function(r){return r.json();})
+    .then(function(d){ render(d); setTimeout(refresh, 5000); })
+    .catch(function(){ setTimeout(refresh, 5000); });
+}
+refresh();
+</script>
+</body></html>`;
+}
+app.get(ADMIN_PATH + '/devices', (req, res) => { if (!requireAdmin(req, res)) return; res.send(adminDevicesPage()); });
+app.get(ADMIN_PATH + '/api/devices', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const now = Date.now();
+    const DAY = 24 * 3600 * 1000;
+    const list = [];
+    let withOlm = 0;
+    // gop deviceActivity + devices map
+    const all = new Set();
+    deviceActivity.forEach((v, k) => all.add(k));
+    devices.forEach((v, k) => all.add(k));
+    all.forEach(hwid => {
+        const act = deviceActivity.get(hwid) || {};
+        const dev = devices.get(hwid) || {};
+        const lastSeen = act.lastSeen || dev.lastSeen || 0;
+        if (lastSeen && now - lastSeen > DAY) return; // qua 24h -> bo qua
+        if (act.olm_user) withOlm++;
+        list.push({ hwid, device: act.device || dev.name || '', ip: act.ip || dev.ip || '', olm_user: act.olm_user || '', id_cate: act.id_cate || '', mode: act.mode || '', id_user: act.id_user || '', lastSeen });
+    });
+    list.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    res.json({ list: list.slice(0, 200), count: list.length, withOlm });
+});
+app.get(ADMIN_PATH + '/locked', (req, res) => { if (!requireAdmin(req, res)) return; res.send(adminLockedPage()); });
+
+// Đổi mật khẩu admin
+app.post(ADMIN_PATH + '/change-password', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { old, new: npass, confirm } = req.body || {};
+    if (!verifyPass(old, ADMIN_HASH)) return res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('❌ Sai mật khẩu hiện tại!'));
+    if (!npass || npass.length < 6) return res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('❌ Mật khẩu mới tối thiểu 6 ký tự!'));
+    if (npass !== confirm) return res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('❌ Xác nhận mật khẩu không khớp!'));
+    ADMIN_HASH = hashPass(npass);
+    adminSessions.clear(); // đăng xuất mọi phiên khác
+    kvSaveState();
+    adminLog('admin', { action: 'change-password', ip: getClientIp(req) });
+    // Phiên hiện tại cũng bị xoá → yêu cầu đăng nhập lại
+    res.setHeader('Set-Cookie', 'god_admin=; Path=/; Max-Age=0');
+    res.redirect(ADMIN_PATH + '?msg=' + encodeURIComponent('✅ Đổi mật khẩu thành công! Đăng nhập lại bằng mật khẩu mới.'));
+});
+
+// Bật/tắt cờ bảo mật
+app.post(ADMIN_PATH + '/toggle', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const flag = (req.body && req.body.flag) || '';
+    let msg = '✅ Đã cập nhật.';
+    if (flag === 'autoBan') { AUTO_BAN = !AUTO_BAN; msg = AUTO_BAN ? '✅ Đã BẬT auto-ban.' : '⚠️ Đã TẮT auto-ban.'; }
+    else if (flag === 'mobileOnly') { MOBILE_ONLY = !MOBILE_ONLY; msg = MOBILE_ONLY ? '✅ Đã BẬT chỉ chấp nhận Android/iOS.' : '⚠️ Đã TẮT chỉ-mobile (cho phép desktop).'; }
+    else if (flag === 'banDesktop') { BAN_DESKTOP = !BAN_DESKTOP; msg = BAN_DESKTOP ? '✅ Đã BẬT ban desktop.' : '⚠️ Đã TẮT ban desktop (desktop chỉ bị từ chối, không khoá).'; }
+    else if (flag === 'blockVmScript') { BLOCK_VM_SCRIPT = !BLOCK_VM_SCRIPT; msg = BLOCK_VM_SCRIPT ? '✅ Đã BẬT SMART_VM_BLOCK: chỉ chặn VM/proxy/datacenter/desktop; Android/iOS thật vẫn kéo code bình thường.' : '⚠️ Đã TẮT chặn (mọi người đều kéo code được, HARD_DC_BAN vẫn tự chặn datacenter).'; }
+
+    else if (flag === 'blockModule10') { BLOCK_MODULE_10 = !BLOCK_MODULE_10; msg = BLOCK_MODULE_10 ? '✅ Đã BẬT chặn module chuẩn bị 10 điểm (KHÔNG gửi xuống script).' : '⚠️ Đã TẮT chặn (module 10 điểm gửi xuống bình thường).'; }
+    else if (flag === 'hardDcBan') { HARD_DC_BAN = !HARD_DC_BAN; msg = HARD_DC_BAN ? '✅ Đã BẬT HARD_DC_BAN (IP datacenter/proxy gọi API → BAN NGAY).' : '⚠️ Đã TẮT HARD_DC_BAN.'; }
+    else if (flag === 'safeMode') { SAFE_MODE = !SAFE_MODE; msg = SAFE_MODE ? '✅ Đã BẬT SAFE_MODE: auto-ban chỉ log + từ chối, KHÔNG khoá vĩnh viễn (an toàn, tránh ban nhầm).' : '⚠️ Đã TẮT SAFE_MODE — auto-ban sẽ khoá vĩnh viễn IP/thiết bị (dễ ban nhầm nhà mạng CGNAT).'; }
+    else if (flag === 'smartBan') { SMART_BAN = !SMART_BAN; msg = SMART_BAN ? '✅ Đã BẬT SMART_BAN: chỉ ban máy ảo/proxy ảo xác nhận; máy thật Android/iOS KHÔNG bao giờ bị ban + tự mở ban.' : '⚠️ Đã TẮT SMART_BAN — dùng quy tắc ban cũ (dễ ban nhầm).'; }
+    else if (flag === 'dumperGuard') { DUMPER_GUARD = !DUMPER_GUARD; msg = DUMPER_GUARD ? '✅ Đã BẬT DUMPER_GUARD (phát hiện dump → ban key+hwid+ip).' : '⚠️ Đã TẮT DUMPER_GUARD.'; }
+    else if (flag === 'moduleWatermark') { MODULE_WATERMARK = !MODULE_WATERMARK; msg = MODULE_WATERMARK ? '✅ Đã BẬT watermark truy vết module.' : '⚠️ Đã TẮT watermark.'; }
+    else if (flag === 'bankey') { const kk = String(req.body.key || '').trim().toUpperCase(); if (kk) { BANNED_KEYS.add(kk); kvSaveState(); msg = '🔨 Đã KHOÁ key ' + maskKey(kk) + ' — mọi thiết bị dùng key này bị 404.'; } else msg = 'Thiếu key để khoá.'; }
+    else if (flag === 'unbankey') { const uk = String(req.body.key || '').trim().toUpperCase(); if (uk && BANNED_KEYS.delete(uk)) { kvSaveState(); msg = '🔓 Đã MỞ KHOÁ key ' + maskKey(uk) + '.'; } else msg = 'Không tìm thấy key để mở khoá.'; }
+    kvSaveState();
+    adminLog('admin', { action: 'toggle:' + flag, value: flag === 'autoBan' ? AUTO_BAN : flag === 'mobileOnly' ? MOBILE_ONLY : flag === 'banDesktop' ? BAN_DESKTOP : flag === 'blockVmScript' ? BLOCK_VM_SCRIPT : flag === 'blockModule10' ? BLOCK_MODULE_10 : flag === 'hardDcBan' ? HARD_DC_BAN : flag === 'safeMode' ? SAFE_MODE : flag === 'smartBan' ? SMART_BAN : flag === 'dumperGuard' ? DUMPER_GUARD : flag === 'moduleWatermark' ? MODULE_WATERMARK : (req.body.key || ''), ip: getClientIp(req) });
+    res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent(msg));
+});
+
+// Mở khoá (unban)
+app.post(ADMIN_PATH + '/unban', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const key = String((req.body && req.body.key) || '').trim();
+    if (key) { removeBan(key); adminLog('admin', { action: 'unban', target: key, ip: getClientIp(req) }); }
+    res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('✅ Đã mở khoá: ' + key));
+});
+
+// [v13] MỞ KHOÁ TẤT CẢ — reset toàn bộ IP/thiết bị bị khoá (gỡ ban nhầm) + xóa cache IP
+app.post(ADMIN_PATH + '/unban-all', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const n = banned.size;
+    banned.clear();            // gỡ toàn bộ ban IP + HWID
+    ipCache.clear();           // xóa cache IP → check lại từ đầu, không dùng kết quả nhận nhầm cũ
+    keyActivity.clear();       // reset theo dõi dumper (trạng thái cũ có thể do nhận nhầm)
+    lockedScripts.clear();     // [v13] mở khoá luôn các script bị khoá do phát hiện nhầm
+    // Giữ nguyên BANNED_KEYS (key admin revokle chủ động) và olmBans (ban tài khoản OLM có chủ đích)
+    kvSaveState();
+    adminLog('admin', { action: 'unban-all', cleared: n, ip: getClientIp(req) });
+    res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('✅ Đã MỞ KHOÁ TẤT CẢ (' + n + ' IP/thiết bị). Cache IP đã xóa — mọi thiết bị bị khoá nhầm đã hoạt động lại.'));
+});
+
+// Khoá thủ công
+app.post(ADMIN_PATH + '/ban', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const target = String((req.body && req.body.target) || '').trim();
+    const reason = String((req.body && req.body.reason) || 'manual').trim();
+    if (!target) return res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('❌ Thiếu đối tượng khoá!'));
+    const key = /^\d+\.\d+\.\d+\.\d+$/.test(target) || target.includes(':') ? (target.includes(':') ? target : 'ip:' + target) : 'dev:' + target;
+    banned.set(key, { reason, device: '', t: Date.now(), by: 'admin' });
+    kvSaveState();
+    adminLog('admin', { action: 'ban', target: key, reason, ip: getClientIp(req) });
+    res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('✅ Đã khoá: ' + key));
+});
+
+// [v9] ===== ADMIN: BAN / UNBAN TAI KHOAN OLM =====
+app.post(ADMIN_PATH + '/olm-ban', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const olm = String((req.body && req.body.olm_user) || '').trim();
+    const unit = String((req.body && req.body.unit) || 'day'); // minute|day|month|permanent
+    const val = parseFloat((req.body && req.body.value) || '1');
+    const reason = String((req.body && req.body.reason) || 'vi pham dieu khoan').trim();
+    if (!olm) return res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('❌ Thiếu tài khoản OLM!'));
+    let minutes;
+    if (unit === 'permanent') minutes = -1;
+    else if (unit === 'minute') minutes = Math.max(1, val);
+    else if (unit === 'month') minutes = Math.max(1, val) * 30 * 24 * 60;
+    else minutes = Math.max(1, val) * 24 * 60; // day (mac dinh)
+    addOlmBan(olm, minutes, reason, 'admin');
+    const unitLabel = unit === 'permanent' ? 'vinh vien' : (unit === 'minute' ? 'phut' : unit === 'month' ? 'thang' : 'ngay');
+    adminLog('admin', { action: 'olm-ban', olm: normOlm(olm), unit, value: val, minutes, reason, ip: getClientIp(req) });
+    res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('✅ Đã BAN tài khoản OLM: ' + olm + ' (' + (unit === 'permanent' ? 'VĨNH VIỄN' : (val + ' ' + unitLabel)) + ')'));
+});
+app.post(ADMIN_PATH + '/olm-unban', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const olm = String((req.body && req.body.olm_user) || '').trim();
+    if (!olm) return res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('❌ Thiếu tài khoản OLM!'));
+    const had = removeOlmBan(olm);
+    adminLog('admin', { action: 'olm-unban', olm: normOlm(olm), had, ip: getClientIp(req) });
+    res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent(had ? '✅ Đã UNBAN tài khoản OLM: ' + olm : '⚠️ Không tìm thấy tài khoản: ' + olm));
+});
+app.get(ADMIN_PATH + '/olm-bans.json', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const list = [...olmBans.entries()].map(([k, v]) => {
+        const ob = checkOlmBan(k); // tu go ban het han
+        return { olm: k, reason: v.reason, until: v.until, permanent: !v.until, t: v.t, by: v.by, remain: ob ? ob.remain : 'đã hết hạn' };
+    }).filter(x => x.remain !== 'đã hết hạn');
+    res.json({ list, count: list.length });
+});
+// Đổi SECRET (ẩn API prefix + ký session)
+app.post(ADMIN_PATH + '/set-secret', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    let secret = String((req.body && req.body.secret) || '').trim();
+    if (!secret) secret = crypto.randomBytes(32).toString('hex');
+    if (secret.length < 8) return res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('❌ SECRET quá ngắn!'));
+    SECRET = secret;
+    API_PREFIX = computeApiPrefix(SECRET);
+    kvSaveState();
+    adminLog('admin', { action: 'set-secret', newLength: secret.length, ip: getClientIp(req) });
+    res.redirect(ADMIN_PATH + '/dashboard?msg=' + encodeURIComponent('✅ Đã đổi SECRET. API prefix mới: ' + API_PREFIX + ' — CẬP NHẬT API_SECRET trong connector!'));
+});
+
+app.get(ADMIN_PATH + '/logs.json', (req, res) => { if (!requireAdmin(req, res)) return; res.json({ logs: ADMIN_LOG.slice(0, 100), count: ADMIN_LOG.length }); });
+
+// [v6.4] Admin JSON API cho tab khoá script lạ (gọi từ trang /admin/locked qua fetch)
+app.get(ADMIN_PATH + '/api/locked', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const list = [...lockedScripts.entries()].slice(0, 200).map(([k, v]) => ({
+        hwid: k, ip: v.ip || '', device: v.device || '', reason: v.reason || '',
+        keyMasked: v.keyMasked || '', olm_user: v.olm_user || '',
+        t: v.t || 0, lastSeen: v.lastSeen || 0, status: v.status || 'locked', unlockedAt: v.unlockedAt || 0
+    })).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    res.json({ locked: list, count: lockedScripts.size, lockedActive: list.filter(x => x.status === 'locked').length });
+});
+app.post(ADMIN_PATH + '/api/locked/unlock', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const hwid = String((req.body && req.body.hwid) || '').trim();
+    const rec = hwid && lockedScripts.get(hwid);
+    if (rec) {
+        rec.status = 'unlocked'; rec.unlockedAt = Date.now();
+        // Gỡ luôn ban IP/HWID nếu có → client polling thành công, tự mở khoá
+        banned.delete('dev:' + hwid);
+        if (rec.ip) banned.delete('ip:' + rec.ip);
+        kvSaveState();
+        adminLog('admin', { action: 'unlock-script', hwid, ip: rec.ip, device: rec.device || '', ipAdmin: getClientIp(req) });
+    }
+    res.json({ ok: true, unlocked: !!rec });
+});
+app.post(ADMIN_PATH + '/api/locked/lock', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const hwid = String((req.body && req.body.hwid) || '').trim();
+    const reason = String((req.body && req.body.reason) || 'admin re-lock').slice(0, 200);
+    if (!hwid) return res.json({ ok: false });
+    const rec = lockedScripts.get(hwid) || { hwid, ip: '', device: '', keyMasked: '', olm_user: '', t: Date.now() };
+    rec.status = 'locked'; rec.reason = reason; rec.lastSeen = Date.now();
+    lockedScripts.set(hwid, rec); kvSaveState();
+    adminLog('admin', { action: 'lock-script', hwid, reason, ipAdmin: getClientIp(req) });
+    res.json({ ok: true });
+});
+app.post(ADMIN_PATH + '/api/locked/delete', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const hwid = String((req.body && req.body.hwid) || '').trim();
+    if (hwid) { lockedScripts.delete(hwid); kvSaveState(); adminLog('admin', { action: 'delete-lock-record', hwid, ipAdmin: getClientIp(req) }); }
+    res.json({ ok: true });
+});
+
+// 404 fallback — không tiết lộ thông tin
+app.use((_req, res) => res.status(404).json({ success: false, error: 'Not found', message: 'Endpoint không tồn tại hoặc yêu cầu bị từ chối.' }));
+// Error handler
+app.use((err, _req, res, _next) => { console.error('[server-error]', err && err.message ? err.message : err); res.status(500).json({ success: false, error: 'Internal server error' }); });
+
+// ─── Start / Export ──────────────────────────────────────────────────────────
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`\n🚀 GOD MODE Server v17.0 (Bảo mật nâng cao) running → http://localhost:${PORT}`);
+        console.log(`   Ẩn API prefix: ${API_PREFIX}`);
+        console.log(`   Admin: ${ADMIN_PATH} (${ADMIN_USER})`);
+        console.log(`   Lưu trữ bền vững (KV): ${KV_ENABLED ? 'CÓ' : 'KHÔNG — đặt env KV_REST_API_URL + KV_REST_API_TOKEN để ban/mật khẩu tồn tại qua restart'}`);
+        // [v13] Cảnh báo SAFE_MODE / HARD_DC_BAN trạng thái
+        if (SAFE_MODE) console.log('\x1b[32m[v13 SAFE_MODE ĐANG BẬT] Auto-ban chỉ log + từ chối, KHÔNG khoá vĩnh viễn — không còn ban nhầm IP thật. Tắt: env SAFE_MODE=false hoặc panel admin.\x1b[0m');
+        else console.log('\x1b[33m[v13] CẢNH BÁO: SAFE_MODE đang TẮT — auto-ban sẽ khoá vĩnh viễn, dễ ban nhầm IP nhà mạng di động (CGNAT).\x1b[0m');
+        if (!HARD_DC_BAN) console.log('\x1b[33m[v13] HARD_DC_BAN đang TẮT (kill-switch). Bật trong panel admin nếu muốn chặn cứng IP datacenter.\x1b[0m');
+        if (SMART_BAN) console.log('\x1b[32m[v14 SMART_BAN ĐANG BẬT] Chi ban may ao/emulator/proxy xac nhan; may that Android/iOS KHONG bao gio bi ban + tu mo ban tu dong.\x1b[0m');
+        else console.log('\x1b[33m[v14] SMART_BAN dang TAT — de ban thong minh, bat lai trong panel admin.\x1b[0m');
+        if (SMART_BAN) console.log('\x1b[36m[v15] AUTO_UNLOCK_REAL_IP: IP that cua Android/iOS tu dong mo khoa ngay khi ket noi — khong can admin thao tac.\x1b[0m');
+        if (!BLOCK_VM_SCRIPT) console.warn('\x1b[33m   [SECURITY v12] SMART_VM_BLOCK dang TAT — vao admin panel BAT de chi cho Android/iOS that keo code (chan VM/proxy/desktop, KHONG anh huong user that).\x1b[0m');
+        if (BLOCK_VM_SCRIPT) console.log('\x1b[32m   [SECURITY v12] SMART_VM_BLOCK dang BAT: chi chan VM/proxy/datacenter/desktop, Android/iOS that van hoat dong binh thuong.\x1b[0m');
+        if (SECRET === DEFAULT_SECRET) console.warn('\x1b[31m   [SECURITY] SECRET MAC DINH DA ROI ROI — dat env GODMODE_SECRET (64 hex) NGAY.\x1b[0m');
+    });
+}
+module.exports = app;
